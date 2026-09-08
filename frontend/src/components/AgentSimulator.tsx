@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Play,
   Bot,
@@ -7,6 +7,8 @@ import {
   AlertTriangle,
   RefreshCw,
   Coins,
+  ExternalLink,
+  XCircle,
 } from "lucide-react";
 import type { LogEntry } from "./TelemetryStream.js";
 import type { OracleVerdictData, GraphTelemetryData } from "./RiskRadar.js";
@@ -33,6 +35,31 @@ interface AgentSimulatorProps {
 }
 
 type StepStatus = "idle" | "challenging" | "settling" | "unlocked";
+type PaymentsMode = "mock" | "live";
+
+interface Challenge {
+  challengeId: string;
+  amount: string;
+  currency: string;
+  recipient: string;
+  paymentUrl?: string;
+  linkId?: string;
+}
+
+interface PaymentStatusPayload {
+  challengeId: string;
+  linkId?: string;
+  status: "pending" | "completed" | "expired" | "unknown";
+  paymentUrl?: string;
+  amount: string;
+  currency: string;
+}
+
+interface UnlockedPayload {
+  oracleVerdict: OracleVerdictData;
+  graphTelemetry: GraphTelemetryData;
+  agentSemanticContext: string;
+}
 
 const STEPS: Array<{ id: StepStatus; label: string; hint: string }> = [
   {
@@ -40,9 +67,16 @@ const STEPS: Array<{ id: StepStatus; label: string; hint: string }> = [
     label: "01 // 402 Challenge",
     hint: "GATE ISSUES RECEIPT",
   },
-  { id: "settling", label: "02 // Moove Settle", hint: "0.05 USDC STREAM" },
+  { id: "settling", label: "02 // Moove Settle", hint: "0.0003 SOL MAINNET" },
   { id: "unlocked", label: "03 // Risk Unlocked", hint: "GRAPH VERDICT" },
 ];
+
+const POLL_INTERVAL_MS = 3000;
+const MAX_POLLS = 100; // ~5 minutes against a 15-minute challenge window
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 export const AgentSimulator: React.FC<AgentSimulatorProps> = ({
   onAddLog,
@@ -53,135 +87,259 @@ export const AgentSimulator: React.FC<AgentSimulatorProps> = ({
   const [isRunning, setIsRunning] = useState(false);
   const [stepStatus, setStepStatus] = useState<StepStatus>("idle");
   const [progress, setProgress] = useState(0);
+  const [paymentsMode, setPaymentsMode] = useState<PaymentsMode>("mock");
+  const [activeChallenge, setActiveChallenge] = useState<Challenge | null>(
+    null,
+  );
+  const [pollCount, setPollCount] = useState(0);
+  const cancelledRef = useRef(false);
 
   const activeTarget =
     customToken.trim() !== ""
       ? customToken.trim().toUpperCase()
       : selectedToken;
 
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/v1/oracle/health")
+      .then((res) => {
+        if (!res.ok) return;
+        return res.json() as Promise<{
+          payments?: { mode?: PaymentsMode };
+        }>;
+      })
+      .then((data) => {
+        if (alive && data?.payments?.mode === "live") {
+          setPaymentsMode("live");
+        }
+      })
+      .catch(() => {
+        // Health unreachable: stay in mock display until backend responds.
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const log = (entry: Omit<LogEntry, "id">): void => onAddLog(entry);
+  const now = (): string => new Date().toLocaleTimeString();
+
+  const fail = (message: string): void => {
+    log({ timestamp: now(), type: "WARN", message });
+    setStepStatus("idle");
+    setProgress(0);
+    setActiveChallenge(null);
+    setPollCount(0);
+  };
+
+  /** Shared: issue the 402 and return the live challenge. */
+  const requestChallenge = async (
+    target: string,
+  ): Promise<Challenge | null> => {
+    const res = await fetch(`/api/v1/oracle/risk?target=${target}&type=TOKEN`);
+    if (res.status === 402) {
+      const data = (await res.json()) as { challenge: Challenge };
+      return data.challenge;
+    }
+    await fail(`Unexpected response status: HTTP ${res.status}`);
+    return null;
+  };
+
+  /** Shared: retry /risk with a receipt and surface the unlocked verdict. */
+  const unlockWithReceipt = async (
+    target: string,
+    receipt: Record<string, string>,
+  ): Promise<boolean> => {
+    const unlockedRes = await fetch(
+      `/api/v1/oracle/risk?target=${target}&type=TOKEN`,
+      { headers: { "X-PAYMENT": JSON.stringify(receipt) } },
+    );
+
+    if (unlockedRes.status === 202) {
+      return false; // paid link not settled yet — caller keeps polling
+    }
+    if (!unlockedRes.ok) {
+      await fail(`Verification rejected: HTTP ${unlockedRes.status}`);
+      return false;
+    }
+    const payload = (await unlockedRes.json()) as UnlockedPayload;
+    log({
+      timestamp: now(),
+      type: "UNLOCKED_200",
+      message: `Sentinel verified settlement. Unlocked risk analysis for $${target} (${payload.oracleVerdict.verdict}).`,
+      meta: {
+        verdict: payload.oracleVerdict.verdict,
+        riskScore: payload.oracleVerdict.riskScore,
+        durationMs: payload.graphTelemetry.queryDurationMs,
+      },
+    });
+    onAssessmentUnlocked(
+      payload.oracleVerdict,
+      payload.graphTelemetry,
+      payload.agentSemanticContext,
+    );
+    setStepStatus("unlocked");
+    setProgress(100);
+    setActiveChallenge(null);
+    setPollCount(0);
+    return true;
+  };
+
+  /** Mock sandbox path: backend accepts a simulated receipt, no money moves. */
+  const runMockSimulation = async (target: string): Promise<void> => {
+    const challenge = await requestChallenge(target);
+    if (!challenge) return;
+    log({
+      timestamp: now(),
+      type: "CHALLENGE_402",
+      message: `Sentinel Gate issued HTTP 402 Payment Required for Challenge [${challenge.challengeId}] (mock sandbox — no charge).`,
+      meta: {
+        amount: `${challenge.amount} ${challenge.currency}`,
+        recipient: challenge.recipient,
+        protocol: "moove-x402-v1",
+      },
+    });
+
+    setStepStatus("settling");
+    setProgress(48);
+    await sleep(700);
+    if (cancelledRef.current) return;
+
+    const simulatedTx = `5K9x${Math.random().toString(36).substring(2, 9)}MockSandboxReceipt`;
+    log({
+      timestamp: now(),
+      type: "PAYMENT_SETTLED",
+      message: `Sandbox receipt minted locally (mock mode — 0 SOL moved).`,
+      meta: { txSignature: simulatedTx, challengeId: challenge.challengeId },
+    });
+    setProgress(74);
+
+    await unlockWithReceipt(target, {
+      challengeId: challenge.challengeId,
+      txSignature: simulatedTx,
+      payerAddress: "4vW2...AgentTraderVault",
+    });
+  };
+
+  /** Live path: payer completes the Moove checkout, we poll to completion. */
+  const runLiveSettlement = async (target: string): Promise<void> => {
+    const challenge = await requestChallenge(target);
+    if (!challenge) return;
+    if (!challenge.paymentUrl) {
+      await fail(
+        "Live challenge arrived without a paymentUrl — Moove link creation failed.",
+      );
+      return;
+    }
+    setActiveChallenge(challenge);
+    log({
+      timestamp: now(),
+      type: "CHALLENGE_402",
+      message: `Sentinel Gate issued HTTP 402 for Challenge [${challenge.challengeId}]. Complete the Moove checkout (${challenge.amount} ${challenge.currency} mainnet) to unlock.`,
+      meta: {
+        amount: `${challenge.amount} ${challenge.currency}`,
+        recipient: challenge.recipient,
+        paymentUrl: challenge.paymentUrl,
+        linkId: challenge.linkId ?? "n/a",
+        protocol: "moove-x402-v1",
+      },
+    });
+
+    setStepStatus("settling");
+    setProgress(30);
+    window.open(challenge.paymentUrl, "_blank", "noopener,noreferrer");
+
+    for (let poll = 1; poll <= MAX_POLLS; poll += 1) {
+      if (cancelledRef.current) return;
+      setPollCount(poll);
+      setProgress(30 + Math.min(40, Math.floor((poll / MAX_POLLS) * 40)));
+
+      const params = new URLSearchParams();
+      if (challenge.linkId) params.set("linkId", challenge.linkId);
+      const statusRes = await fetch(
+        `/api/v1/oracle/payment/${challenge.challengeId}/status?${params.toString()}`,
+      );
+      if (!statusRes.ok) {
+        await fail(`Payment status lookup failed: HTTP ${statusRes.status}`);
+        return;
+      }
+      const status = (await statusRes.json()) as PaymentStatusPayload;
+
+      if (status.status === "completed") {
+        log({
+          timestamp: now(),
+          type: "PAYMENT_SETTLED",
+          message: `Moove reports link settled for Challenge [${challenge.challengeId}]. Submitting proof...`,
+          meta: { linkId: challenge.linkId ?? "n/a" },
+        });
+        setProgress(74);
+        const receipt: Record<string, string> = {
+          challengeId: challenge.challengeId,
+        };
+        if (challenge.linkId) receipt["linkId"] = challenge.linkId;
+        const done = await unlockWithReceipt(target, receipt);
+        if (!done) {
+          // Backend said 202 after status said completed — keep polling.
+          continue;
+        }
+        return;
+      }
+      if (status.status === "expired" || status.status === "unknown") {
+        await fail(
+          `Payment link ${status.status}. Challenge [${challenge.challengeId}] can no longer settle — restart the query for a fresh link.`,
+        );
+        return;
+      }
+      await sleep(POLL_INTERVAL_MS);
+    }
+    await fail(
+      "Timed out waiting for settlement (~5 min). Restart to mint a fresh link.",
+    );
+  };
+
   const runSimulation = async (): Promise<void> => {
+    cancelledRef.current = false;
     setIsRunning(true);
     setStepStatus("challenging");
     setProgress(12);
+    setPollCount(0);
 
-    onAddLog({
-      timestamp: new Date().toLocaleTimeString(),
+    log({
+      timestamp: now(),
       type: "INFO",
       message: `Autonomous Bot initiated swap check for $${activeTarget} on DEX liquidity pool.`,
     });
 
     try {
-      const res = await fetch(
-        `/api/v1/oracle/risk?target=${activeTarget}&type=TOKEN`,
-      );
-
-      if (res.status === 402) {
-        const challengeData = (await res.json()) as {
-          challenge: {
-            challengeId: string;
-            amount: string;
-            currency: string;
-            recipient: string;
-          };
-        };
-
-        const challenge = challengeData.challenge;
-        onAddLog({
-          timestamp: new Date().toLocaleTimeString(),
-          type: "CHALLENGE_402",
-          message: `Sentinel Gate issued HTTP 402 Payment Required for Challenge [${challenge.challengeId}].`,
-          meta: {
-            amount: `${challenge.amount} ${challenge.currency}`,
-            recipient: challenge.recipient,
-            protocol: "moove-x402-v1",
-          },
-        });
-
-        setStepStatus("settling");
-        setProgress(48);
-        await new Promise((r) => setTimeout(r, 900));
-
-        const simulatedTx = `5K9x${Math.random().toString(36).substring(2, 9)}MooveDevnetReceipt`;
-        onAddLog({
-          timestamp: new Date().toLocaleTimeString(),
-          type: "PAYMENT_SETTLED",
-          message: `Bot streamed ${challenge.amount} ${challenge.currency} on Solana Devnet via Moove rails.`,
-          meta: {
-            txSignature: simulatedTx,
-            challengeId: challenge.challengeId,
-          },
-        });
-
-        setProgress(74);
-        await new Promise((r) => setTimeout(r, 700));
-
-        const receipt = {
-          challengeId: challenge.challengeId,
-          txSignature: simulatedTx,
-          payerAddress: "4vW2...AgentTraderVault",
-        };
-
-        const unlockedRes = await fetch(
-          `/api/v1/oracle/risk?target=${activeTarget}&type=TOKEN`,
-          {
-            headers: { "X-PAYMENT": JSON.stringify(receipt) },
-          },
-        );
-
-        if (unlockedRes.ok) {
-          const payload = (await unlockedRes.json()) as {
-            oracleVerdict: OracleVerdictData;
-            graphTelemetry: GraphTelemetryData;
-            agentSemanticContext: string;
-          };
-
-          onAddLog({
-            timestamp: new Date().toLocaleTimeString(),
-            type: "UNLOCKED_200",
-            message: `Sentinel verified receipt. Unlocked risk analysis for $${activeTarget} (${payload.oracleVerdict.verdict}).`,
-            meta: {
-              verdict: payload.oracleVerdict.verdict,
-              riskScore: payload.oracleVerdict.riskScore,
-              durationMs: payload.graphTelemetry.queryDurationMs,
-            },
-          });
-
-          onAssessmentUnlocked(
-            payload.oracleVerdict,
-            payload.graphTelemetry,
-            payload.agentSemanticContext,
-          );
-          setStepStatus("unlocked");
-          setProgress(100);
-        } else {
-          onAddLog({
-            timestamp: new Date().toLocaleTimeString(),
-            type: "WARN",
-            message: `Verification rejected: HTTP ${unlockedRes.status}`,
-          });
-          setStepStatus("idle");
-          setProgress(0);
-        }
+      if (paymentsMode === "live") {
+        await runLiveSettlement(activeTarget);
       } else {
-        onAddLog({
-          timestamp: new Date().toLocaleTimeString(),
-          type: "WARN",
-          message: `Unexpected response status: HTTP ${res.status}`,
-        });
-        setStepStatus("idle");
-        setProgress(0);
+        await runMockSimulation(activeTarget);
       }
     } catch (err) {
-      onAddLog({
-        timestamp: new Date().toLocaleTimeString(),
-        type: "WARN",
-        message: `Network error connecting to Sentinel backend: ${err instanceof Error ? err.message : String(err)}`,
-      });
-      setStepStatus("idle");
-      setProgress(0);
+      if (!cancelledRef.current) {
+        await fail(
+          `Network error connecting to Sentinel backend: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     } finally {
       setIsRunning(false);
     }
+  };
+
+  const cancelRun = (): void => {
+    cancelledRef.current = true;
+    setIsRunning(false);
+    setStepStatus("idle");
+    setProgress(0);
+    setActiveChallenge(null);
+    setPollCount(0);
+    log({
+      timestamp: now(),
+      type: "WARN",
+      message:
+        "Operator cancelled the pending settlement wait. No charge was completed.",
+    });
   };
 
   return (
@@ -284,6 +442,39 @@ export const AgentSimulator: React.FC<AgentSimulatorProps> = ({
 
         <Progress value={progress} className="h-1.5" />
 
+        {/* live payment panel */}
+        {activeChallenge?.paymentUrl && stepStatus === "settling" && (
+          <div className="border border-blaze/50 bg-blaze/10 clip-cyber-sm p-4 space-y-2">
+            <div className="font-mono text-[11px] font-bold tracking-[0.22em] text-blaze">
+              ◉ AWAITING PAYMENT — POLL {pollCount}/{MAX_POLLS}
+            </div>
+            <p className="font-mono text-[11px] text-bone/70 leading-relaxed">
+              Complete the Moove checkout for{" "}
+              <span className="text-bone font-bold">
+                {activeChallenge.amount} {activeChallenge.currency}
+              </span>{" "}
+              (challenge{" "}
+              <span className="text-blaze">{activeChallenge.challengeId}</span>
+              ). This panel unlocks automatically once the link settles.
+            </p>
+            <div className="flex flex-wrap gap-2 pt-1">
+              <a
+                href={activeChallenge.paymentUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 bg-blaze text-void font-mono text-[11px] font-bold tracking-[0.18em] px-4 py-2 clip-cyber-sm hover:bg-bone transition-colors"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                OPEN MOOVE CHECKOUT
+              </a>
+              <Button variant="secondary" size="sm" onClick={cancelRun}>
+                <XCircle />
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+
         {/* controls */}
         <div className="flex flex-col lg:flex-row gap-3">
           <div className="flex-1 flex flex-col sm:flex-row gap-3">
@@ -322,21 +513,30 @@ export const AgentSimulator: React.FC<AgentSimulatorProps> = ({
             {isRunning ? (
               <>
                 <RefreshCw className="w-4 h-4 animate-spin" />
-                Simulating A2A Check...
+                {paymentsMode === "live"
+                  ? "Awaiting Payment..."
+                  : "Simulating A2A Check..."}
               </>
             ) : (
               <>
                 <Play className="w-4 h-4" />
-                Run 1-Click Bot Query ($0.05)
+                {paymentsMode === "live"
+                  ? "Run Bot Query — Pay $0.0003"
+                  : "Run 1-Click Bot Query ($0.0003)"}
               </>
             )}
           </Button>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="secondary">SOLANA-DEVNET</Badge>
-          <Badge variant="bone">FEE: 0.05 USDC</Badge>
+          <Badge variant="secondary">SOLANA-MAINNET</Badge>
+          <Badge variant="bone">FEE: 0.0003 SOL</Badge>
           <Badge variant="default">HEADER: X-PAYMENT</Badge>
+          {paymentsMode === "live" ? (
+            <Badge variant="warning">● LIVE MAINNET SETTLEMENT</Badge>
+          ) : (
+            <Badge variant="secondary">○ MOCK SANDBOX — NO CHARGE</Badge>
+          )}
           {stepStatus === "unlocked" && (
             <Badge variant="success">✓ LAST QUERY UNLOCKED</Badge>
           )}

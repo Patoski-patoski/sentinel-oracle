@@ -1,0 +1,33 @@
+{
+  "name": "sentinel-oracle",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "backend",
+    "frontend",
+    "client-agent"
+  ],
+  "scripts": {
+    "dev": "bun --filter @sentinel/backend dev",
+    "dev:all": "bun --filter \"*\" dev",
+    "build": "bun --filter @sentinel/backend build && bun --filter @sentinel/frontend build",
+    "lint": "bun --filter @sentinel/backend lint && bun --filter @sentinel/frontend lint",
+    "test": "bun --filter @sentinel/backend test",
+    "prepare": "husky",
+    "seed": "bun run backend/src/seed/seed-cli.ts",
+    "agent:demo": "bun run client-agent/demo-trader-bot.ts"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.7.1",
+    "@commitlint/config-conventional": "^19.7.1",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.4.3",
+    "prettier": "^3.5.2"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,json,md}": [
+      "prettier --write"
+    ]
+  }
+}

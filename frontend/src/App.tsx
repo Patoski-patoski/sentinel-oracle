@@ -27,9 +27,9 @@ const TICKER_ITEMS: string[] = [
   "CIRCULAR WASH LOOP // 6 HOPS",
   "SYBIL FARM // 14 WALLETS",
   "PEELING CHAIN // 9 HOPS TO CEX",
-  "x402 SETTLED // 0.05 USDC",
+  "x402 SETTLED // 0.0003 SOL",
   "COGNODB TRAVERSAL // 42MS",
-  "MOOVE RAILS // SOLANA DEVNET",
+  "MOOVE RAILS // SOLANA MAINNET",
 ];
 
 export function App(): React.JSX.Element {
@@ -219,7 +219,7 @@ export function App(): React.JSX.Element {
               <div className="flex flex-wrap items-center gap-3 pt-1">
                 <Button size="lg" onClick={scrollToSimulator}>
                   <Zap />
-                  Run Bot Query — $0.05
+                  Run Bot Query — $0.0003
                   <ChevronRight />
                 </Button>
                 <Button
@@ -237,7 +237,8 @@ export function App(): React.JSX.Element {
                   CHALLENGE → SETTLE → UNLOCK
                 </span>
                 <span>
-                  <span className="text-bone font-bold">0.05 USDC</span> / QUERY
+                  <span className="text-bone font-bold">0.0003 SOL</span> /
+                  QUERY
                 </span>
               </div>
             </div>
@@ -246,7 +247,7 @@ export function App(): React.JSX.Element {
             <div className="grid grid-cols-3 lg:grid-cols-1 gap-3 content-center">
               {[
                 { k: "AVG TRAVERSAL", v: "~42MS", icon: Activity },
-                { k: "FEE / QUERY", v: "0.05 USDC", icon: Zap },
+                { k: "FEE / QUERY", v: "0.0003 SOL", icon: Zap },
                 { k: "PROTOCOL", v: "X402-V1", icon: Radio },
               ].map((s) => (
                 <div
@@ -279,7 +280,7 @@ export function App(): React.JSX.Element {
           <Separator />
           <div className="relative px-6 sm:px-10 py-2.5 flex flex-wrap items-center gap-x-6 gap-y-1 font-mono text-[10px] tracking-[0.22em] text-bone/45 bg-void/60">
             <span>RECIPIENT: SENTINEL.MOOVE</span>
-            <span className="hidden sm:inline">NETWORK: SOLANA-DEVNET</span>
+            <span className="hidden sm:inline">NETWORK: SOLANA-MAINNET</span>
             <span className="hidden md:inline">ENGINE: COGNODB OPENCYPHER</span>
             <span className="ml-auto text-blaze">■ REC</span>
           </div>

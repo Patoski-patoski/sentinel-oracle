@@ -121,7 +121,7 @@ export const TelemetryStream: React.FC<TelemetryStreamProps> = ({
       <div className="px-5 py-2 border-t border-steel/25 bg-void/70 font-mono text-[9px] tracking-[0.25em] text-bone/35 flex justify-between">
         <span>PROTOCOL: MOOVE-X402-V1</span>
         <span>
-          FEE: <span className="text-blaze">0.05 USDC</span>
+          FEE: <span className="text-blaze">0.0003 SOL</span>
         </span>
       </div>
     </Card>

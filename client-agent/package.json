@@ -1,0 +1,8 @@
+{
+  "name": "@sentinel/client-agent",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "bun run demo-trader-bot.ts"
+  }
+}
