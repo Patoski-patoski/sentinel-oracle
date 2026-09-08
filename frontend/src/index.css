@@ -1,0 +1,125 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --bone: #e9e3df;
+  --blaze: #ff7a30;
+  --steel: #465c88;
+  --void: #000000;
+}
+
+html,
+body {
+  margin: 0;
+  background-color: var(--void);
+  color: var(--bone);
+  font-family: 'Inter', sans-serif;
+  overflow-x: hidden;
+}
+
+code,
+pre,
+.font-mono {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.font-display {
+  font-family: 'Space Grotesk', 'Inter', sans-serif;
+}
+
+/* ---------- cyberpunk clipped corners (shadcn-compatible) ---------- */
+.clip-cyber {
+  clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px);
+}
+.clip-cyber-sm {
+  clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+}
+.clip-cyber-panel {
+  clip-path: polygon(18px 0, 100% 0, 100% calc(100% - 18px), calc(100% - 18px) 100%, 0 100%, 0 18px);
+}
+
+/* ---------- background grids + scanlines ---------- */
+.cyber-grid-bg {
+  background-image:
+    linear-gradient(rgba(70, 92, 136, 0.14) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(70, 92, 136, 0.14) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, black 35%, transparent 85%);
+}
+
+.cyber-scanlines::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent 0px,
+    transparent 3px,
+    rgba(0, 0, 0, 0.28) 4px
+  );
+  mix-blend-mode: multiply;
+}
+
+.cyber-noise::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.5;
+  background-image: radial-gradient(rgba(233, 227, 223, 0.05) 1px, transparent 1px);
+  background-size: 3px 3px;
+}
+
+/* ---------- neon text ---------- */
+.text-glow-orange {
+  text-shadow:
+    0 0 12px rgba(255, 122, 48, 0.8),
+    0 0 42px rgba(255, 122, 48, 0.35);
+}
+.text-glow-bone {
+  text-shadow: 0 0 14px rgba(233, 227, 223, 0.35);
+}
+
+/* glitch headline on hover */
+.glitch-hover {
+  position: relative;
+}
+.glitch-hover:hover::before,
+.glitch-hover:hover::after {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+.glitch-hover:hover::before {
+  color: var(--blaze);
+  transform: translate(-2px, -1px);
+  clip-path: inset(10% 0 55% 0);
+}
+.glitch-hover:hover::after {
+  color: var(--steel);
+  transform: translate(2px, 1px);
+  clip-path: inset(60% 0 5% 0);
+}
+
+/* thin scrollbars for telemetry */
+.cyber-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.cyber-scroll::-webkit-scrollbar-track {
+  background: #000;
+}
+.cyber-scroll::-webkit-scrollbar-thumb {
+  background: #465c88;
+}
+.cyber-scroll::-webkit-scrollbar-thumb:hover {
+  background: #ff7a30;
+}
+
+::selection {
+  background: rgba(255, 122, 48, 0.85);
+  color: #000;
+}
