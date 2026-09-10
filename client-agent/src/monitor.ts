@@ -36,7 +36,11 @@ export function getLiquidityEvent(index: number): LiquidityEvent {
 }
 
 /**
- * Autonomous stream that continuously emits newly detected liquidity pools.
+ * Simulated liquidity event stream for hackathon demo.
+ * Iterates over a fixed set of candidate tokens at timed intervals.
+ * On mainnet, this would subscribe to on-chain liquidity pool creation
+ * events (e.g. Raydium CPMM pool init, Orca Whirlpool pool init) via
+ * WebSocket or geyser plugin.
  */
 export async function* streamLiquidityEvents(
   intervalMs = 8000,

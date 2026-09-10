@@ -70,8 +70,8 @@ export const TOKEN_MINTS: Record<string, string> = {
 /**
  * Fetches a quote from Jupiter DEX API v6.
  * For known mainnet tokens, fetches live quotes from Jupiter API.
- * For devnet / demo synthetic tokens ($SAFE, $MOON), returns an equivalent
- * synthetic quote structure.
+ * Throws if the token has no verified mint or the API is unreachable,
+ * so the agent fails closed rather than trading on fabricated quotes.
  */
 export async function getJupiterQuote(
   inputTokenSymbol: string,
@@ -89,57 +89,46 @@ export async function getJupiterQuote(
 }> {
   const inputMint =
     TOKEN_MINTS[inputTokenSymbol.toUpperCase()] ?? TOKEN_MINTS["SOL"]!;
-  const outputMint =
-    TOKEN_MINTS[outputTokenSymbol.toUpperCase()] ?? TOKEN_MINTS["USDC"]!;
+  const outputMint = TOKEN_MINTS[outputTokenSymbol.toUpperCase()];
+
+  if (!outputMint) {
+    throw new Error(
+      `No verified mint for token "${outputTokenSymbol}". ` +
+        `Known tokens: ${Object.keys(TOKEN_MINTS).join(", ")}. ` +
+        `Add the mint to TOKEN_MINTS before trading unknown tokens.`,
+    );
+  }
 
   const inAmountLamports = Math.round(amountSol * 1e9).toString();
 
-  try {
-    const url = `https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${inAmountLamports}&slippageBps=${slippageBps}`;
-    const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
+  const url = `https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${inAmountLamports}&slippageBps=${slippageBps}`;
+  const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
 
-    if (response.ok) {
-      const data = (await response.json()) as JupiterQuoteResponse;
-      const dex = data.routePlan[0]?.swapInfo.label ?? "Jupiter v6";
-      return {
-        inputMint,
-        outputMint,
-        inAmount: data.inAmount,
-        outAmount: data.outAmount,
-        priceImpactPct: data.priceImpactPct ?? "0.01",
-        route: `${inputTokenSymbol} -> ${dex} -> ${outputTokenSymbol}`,
-        dex,
-      };
-    }
-  } catch {
-    // Fall back to synthetic quote calculation for Devnet/offline tokens
+  if (!response.ok) {
+    throw new Error(
+      `Jupiter API returned ${response.status}: ${response.statusText}. ` +
+        `Cannot fetch quote for ${inputTokenSymbol} -> ${outputTokenSymbol}.`,
+    );
   }
 
-  // Realistic quote calculation for demo pairs
-  const rateMap: Record<string, number> = {
-    SAFE: 142.5,
-    MOON: 9940.0,
-    BONK: 45000000.0,
-    JUP: 180.2,
-    USDC: 185.0,
-  };
-  const rate = rateMap[outputTokenSymbol.toUpperCase()] ?? 100.0;
-  const estimatedOut = (amountSol * rate).toFixed(2);
-
+  const data = (await response.json()) as JupiterQuoteResponse;
+  const dex = data.routePlan[0]?.swapInfo.label ?? "Jupiter v6";
   return {
     inputMint,
     outputMint,
-    inAmount: inAmountLamports,
-    outAmount: estimatedOut,
-    priceImpactPct: "0.04%",
-    route: `${inputTokenSymbol} -> Orca Whirlpool (Devnet) -> ${outputTokenSymbol}`,
-    dex: "Orca Whirlpool",
+    inAmount: data.inAmount,
+    outAmount: data.outAmount,
+    priceImpactPct: data.priceImpactPct ?? "0.01",
+    route: `${inputTokenSymbol} -> ${dex} -> ${outputTokenSymbol}`,
+    dex,
   };
 }
 
 /**
- * Executes a DEX swap transaction on Solana Devnet.
- * Signs an on-chain DEX execution instruction recorded on the Solana blockchain.
+ * Devnet demo: records swap intent on-chain as a Memo instruction.
+ * On mainnet, this would call Jupiter's /swap endpoint to build and submit
+ * a real token-exchange transaction. On devnet, Jupiter DEX pools don't
+ * exist for synthetic tokens, so we record the intent as proof-of-decision.
  */
 export async function executeDEXSwap(
   connection: Connection,
@@ -155,7 +144,7 @@ export async function executeDEXSwap(
 
   const swapPayload = JSON.stringify({
     app: "Sentinel-Autonomous-DEX-Trader",
-    action: "SWAP_EXECUTE",
+    action: "SWAP_INTENT",
     input: `${amountSol} ${inputSymbol}`,
     expectedOutput: `${quote.outAmount} ${outputSymbol}`,
     dex: quote.dex,

@@ -7,7 +7,7 @@
  * 3. Uses its local Solana keypair to settle micro-payments on-chain.
  * 4. Verifies settlement with cryptographic proof via X-PAYMENT header.
  * 5. Consumes Gemini-powered graph risk intelligence.
- * 6. Executes Jupiter DEX swaps when safe, or protects capital when fraud is detected.
+ * 6. Records swap intent on-chain when safe, or protects capital when fraud is detected.
  */
 
 import { Connection, LAMPORTS_PER_SOL } from "@solana/web3.js";
@@ -247,24 +247,32 @@ export async function runAutonomousTrader(): Promise<void> {
       ...(challenge.linkId ? { linkId: challenge.linkId } : {}),
     };
 
-    const oracleResponse = await fetch(
-      `${ORACLE_BASE_URL}/api/v1/oracle/risk?target=${tokenSymbol}&type=TOKEN`,
-      {
-        headers: {
-          "X-PAYMENT": JSON.stringify(receipt),
+    let oracleResult: OracleResponsePayload;
+    try {
+      const oracleResponse = await fetch(
+        `${ORACLE_BASE_URL}/api/v1/oracle/risk?target=${tokenSymbol}&type=TOKEN`,
+        {
+          headers: {
+            "X-PAYMENT": JSON.stringify(receipt),
+          },
         },
-      },
-    );
-
-    if (!oracleResponse.ok) {
-      console.error(
-        `${COLORS.red}❌ Oracle returned HTTP ${oracleResponse.status}${COLORS.reset}`,
       );
-      console.error(await oracleResponse.text());
+
+      if (!oracleResponse.ok) {
+        console.error(
+          `${COLORS.red}❌ Oracle returned HTTP ${oracleResponse.status}${COLORS.reset}`,
+        );
+        console.error(await oracleResponse.text());
+        return;
+      }
+
+      oracleResult = (await oracleResponse.json()) as OracleResponsePayload;
+    } catch (networkErr) {
+      console.error(
+        `${COLORS.red}❌ Failed to reach Sentinel Oracle after payment: ${networkErr instanceof Error ? networkErr.message : String(networkErr)}${COLORS.reset}`,
+      );
       return;
     }
-
-    const oracleResult = (await oracleResponse.json()) as OracleResponsePayload;
     console.log(
       `         ${COLORS.green}${COLORS.bold}HTTP 200 OK — Payment Verified by Sentinel! Risk payload unlocked.${COLORS.reset}`,
     );
@@ -272,82 +280,94 @@ export async function runAutonomousTrader(): Promise<void> {
     await sleep(400);
 
     // Step E: Machine Verdict & Telemetry Analysis
-    const verdict = oracleResult.oracleVerdict;
-    const telemetry = oracleResult.graphTelemetry;
+    try {
+      const verdict = oracleResult.oracleVerdict;
+      const telemetry = oracleResult.graphTelemetry;
 
-    console.log(
-      `\n${COLORS.bold}[ORACLE INTELLIGENCE REPORT FOR $${tokenSymbol}]:${COLORS.reset}`,
-    );
-    console.log(
-      `  • Verdict:          ${verdict.canExecute ? COLORS.green : COLORS.red}${COLORS.bold}${verdict.verdict}${COLORS.reset}`,
-    );
-    console.log(
-      `  • Risk Score:       ${verdict.riskScore >= 70 ? COLORS.red : COLORS.green}${COLORS.bold}${verdict.riskScore}/100${COLORS.reset} (Confidence: ${(verdict.confidence * 100).toFixed(0)}%)`,
-    );
-    console.log(
-      `  • Graph Telemetry:  ${telemetry.analyzedNodes} nodes traversed in ${telemetry.queryDurationMs}ms`,
-    );
-    if (telemetry.washVolumeSol > 0) {
       console.log(
-        `  • Wash Volume:      ${COLORS.red}$${telemetry.washVolumeSol.toLocaleString()} SOL cycling in loops${COLORS.reset}`,
+        `\n${COLORS.bold}[ORACLE INTELLIGENCE REPORT FOR $${tokenSymbol}]:${COLORS.reset}`,
       );
-    }
-    if (telemetry.sybilCount > 0) {
       console.log(
-        `  • Sybil Cluster:    ${COLORS.red}${telemetry.sybilCount} coordinated sniping wallets${COLORS.reset}`,
+        `  • Verdict:          ${verdict.canExecute ? COLORS.green : COLORS.red}${COLORS.bold}${verdict.verdict}${COLORS.reset}`,
       );
-    }
-    console.log(
-      `  • Gemini AI Directive:\n    ${COLORS.dim}"${oracleResult.agentSemanticContext}"${COLORS.reset}`,
-    );
-
-    // Step F: Autonomous Trade Decision & DEX Execution
-    if (verdict.canExecute) {
       console.log(
-        `\n${COLORS.green}${COLORS.bold}✅ [DECISION: APPROVE SWAP] Token passed Sentinel safety inspection.${COLORS.reset}`,
+        `  • Risk Score:       ${verdict.riskScore >= 70 ? COLORS.red : COLORS.green}${COLORS.bold}${verdict.riskScore}/100${COLORS.reset} (Confidence: ${(verdict.confidence * 100).toFixed(0)}%)`,
       );
-      console.log(`   Routing optimal swap through Jupiter DEX engine...`);
-
-      const quote = await getJupiterQuote("SOL", tokenSymbol, TRADE_AMOUNT_SOL);
-      console.log(`   Route:            ${quote.route}`);
-      console.log(`   Expected Output:  ${quote.outAmount} $${tokenSymbol}`);
-      console.log(`   Price Impact:     ${quote.priceImpactPct}`);
-
-      console.log(`   Broadcasting swap transaction to Solana...`);
-      try {
-        const swapResult = await executeDEXSwap(
-          connection,
-          wallet.keypair,
-          "SOL",
-          tokenSymbol,
-          TRADE_AMOUNT_SOL,
-          quote,
-        );
-        swapsExecutedCount++;
+      console.log(
+        `  • Graph Telemetry:  ${telemetry.analyzedNodes} nodes traversed in ${telemetry.queryDurationMs}ms`,
+      );
+      if (telemetry.washVolumeSol > 0) {
         console.log(
-          `   ${COLORS.green}✔ DEX Swap Executed On-Chain!${COLORS.reset}`,
-        );
-        console.log(
-          `   Swap Tx:   ${COLORS.dim}${swapResult.txSignature}${COLORS.reset}`,
-        );
-        console.log(
-          `   Explorer:  ${COLORS.cyan}https://explorer.solana.com/tx/${swapResult.txSignature}?cluster=devnet${COLORS.reset}`,
-        );
-      } catch (swapErr) {
-        console.warn(
-          `   ⚠️ Swap broadcasting notice: ${swapErr instanceof Error ? swapErr.message : String(swapErr)}`,
+          `  • Wash Volume:      ${COLORS.red}$${telemetry.washVolumeSol.toLocaleString()} SOL cycling in loops${COLORS.reset}`,
         );
       }
-    } else {
-      capitalProtectedCount++;
+      if (telemetry.sybilCount > 0) {
+        console.log(
+          `  • Sybil Cluster:    ${COLORS.red}${telemetry.sybilCount} coordinated sniping wallets${COLORS.reset}`,
+        );
+      }
       console.log(
-        `\n${COLORS.red}${COLORS.bold}🚨 [DECISION: ABORT SWAP] Sentinel identified critical on-chain threat.${COLORS.reset}`,
+        `  • Gemini AI Directive:\n    ${COLORS.dim}"${oracleResult.agentSemanticContext}"${COLORS.reset}`,
       );
-      console.log(
-        `   ${COLORS.bold}Capital Protection:${COLORS.reset} Refused to deploy ${TRADE_AMOUNT_SOL} SOL into fraudulent pool.`,
-      );
-      console.log(
-        `   Anomalies Detected: ${verdict.detectedAnomalies.map((a) => `[${a.type}]`).join(", ")}`,
+
+      // Step F: Autonomous Trade Decision & DEX Execution
+      if (verdict.canExecute) {
+        console.log(
+          `\n${COLORS.green}${COLORS.bold}✅ [DECISION: APPROVE SWAP] Token passed Sentinel safety inspection.${COLORS.reset}`,
+        );
+        console.log(`   Routing optimal swap through Jupiter DEX engine...`);
+
+        try {
+          const quote = await getJupiterQuote(
+            "SOL",
+            tokenSymbol,
+            TRADE_AMOUNT_SOL,
+          );
+          console.log(`   Route:            ${quote.route}`);
+          console.log(
+            `   Expected Output:  ${quote.outAmount} $${tokenSymbol}`,
+          );
+          console.log(`   Price Impact:     ${quote.priceImpactPct}`);
+
+          console.log(`   Broadcasting swap transaction to Solana...`);
+          const swapResult = await executeDEXSwap(
+            connection,
+            wallet.keypair,
+            "SOL",
+            tokenSymbol,
+            TRADE_AMOUNT_SOL,
+            quote,
+          );
+          swapsExecutedCount++;
+          console.log(
+            `   ${COLORS.green}✔ Swap Intent Recorded On-Chain!${COLORS.reset}`,
+          );
+          console.log(
+            `   Swap Tx:   ${COLORS.dim}${swapResult.txSignature}${COLORS.reset}`,
+          );
+          console.log(
+            `   Explorer:  ${COLORS.cyan}https://explorer.solana.com/tx/${swapResult.txSignature}?cluster=devnet${COLORS.reset}`,
+          );
+        } catch (swapErr) {
+          console.warn(
+            `   ⚠️ Swap failed: ${swapErr instanceof Error ? swapErr.message : String(swapErr)}`,
+          );
+        }
+      } else {
+        capitalProtectedCount++;
+        console.log(
+          `\n${COLORS.red}${COLORS.bold}🚨 [DECISION: ABORT SWAP] Sentinel identified critical on-chain threat.${COLORS.reset}`,
+        );
+        console.log(
+          `   ${COLORS.bold}Capital Protection:${COLORS.reset} Refused to deploy ${TRADE_AMOUNT_SOL} SOL into fraudulent pool.`,
+        );
+        console.log(
+          `   Anomalies Detected: ${verdict.detectedAnomalies.map((a) => `[${a.type}]`).join(", ")}`,
+        );
+      }
+    } catch (parseErr) {
+      console.error(
+        `${COLORS.red}❌ Failed to parse oracle response: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}${COLORS.reset}`,
       );
     }
 

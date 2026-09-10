@@ -143,7 +143,8 @@ export class CognoDBService implements OnModuleInit, OnModuleDestroy {
       // 1. Wash trading query
       const washQuery = `
         MATCH (start:Wallet)-[r0:TRANSFERRED]->(mid:Wallet)-[path:TRANSFERRED*1..5]->(start)
-        WHERE (r0.tokenSymbol = $targetSymbol OR ALL(r IN relationships(path) WHERE r.tokenSymbol = $targetSymbol))
+        WHERE r0.tokenSymbol = $targetSymbol
+          AND ALL(r IN relationships(path) WHERE r.tokenSymbol = $targetSymbol)
           AND ALL(r IN relationships(path) WHERE r.amount >= $minAmount)
           AND r0.amount >= $minAmount
         WITH start, r0, mid, path, relationships(path) AS pathRels, (length(path) + 1) AS hopCount
