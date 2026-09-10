@@ -17,7 +17,8 @@ import {
   settlePaymentOnChain,
 } from "./wallet.js";
 import { getJupiterQuote, executeDEXSwap } from "./jupiter.js";
-import { streamLiquidityEvents, getLiquidityEvent } from "./monitor.js";
+import { streamLiquidityEvents } from "./monitor.js";
+import { buySessionPass } from "./plugins/sendai-sentinel.js";
 
 const ORACLE_BASE_URL =
   process.env["SENTINEL_ORACLE_URL"] ?? "http://localhost:3000";
@@ -96,6 +97,7 @@ export async function runAutonomousTrader(): Promise<void> {
   const args = process.argv.slice(2);
   const targetArg = args.find((a) => !a.startsWith("-"));
   const isLoop = args.includes("--loop") || args.includes("-l") || !targetArg;
+  const useSession = args.includes("--session") || args.includes("-s");
   const singleTarget = targetArg ?? "MOON";
 
   console.log(
@@ -105,7 +107,7 @@ export async function runAutonomousTrader(): Promise<void> {
     `${COLORS.bold}🤖 SENTINEL AUTONOMOUS AGENT: MACHINE-TO-MACHINE (A2A) TRADER${COLORS.reset}`,
   );
   console.log(
-    `${COLORS.dim}Mode: ${isLoop ? "Continuous Liquidity Monitor" : `Single Target Check ($${singleTarget})`} | Network: Solana Devnet${COLORS.reset}`,
+    `${COLORS.dim}Mode: ${isLoop ? "Continuous Liquidity Monitor" : `Single Target Check ($${singleTarget})`} | Session Pass: ${useSession ? "YES" : "NO"} | Network: Solana Devnet${COLORS.reset}`,
   );
   console.log(
     `${COLORS.cyan}========================================================================${COLORS.reset}\n`,
@@ -130,6 +132,30 @@ export async function runAutonomousTrader(): Promise<void> {
     `[AGENT SETUP] Wallet Balance:   ${COLORS.green}${balance.toFixed(4)} SOL${COLORS.reset}\n`,
   );
 
+  // 1b. Optional: Buy Session Pass for bulk zero-latency queries
+  let activeSessionToken: string | undefined;
+  if (useSession) {
+    console.log(
+      `${COLORS.magenta}[SESSION PASS]${COLORS.reset} Purchasing bulk session pass (0.01 SOL → 100 queries / 24h)...`,
+    );
+    try {
+      const pass = await buySessionPass(connection, wallet.keypair, {
+        oracleUrl: ORACLE_BASE_URL,
+      });
+      activeSessionToken = pass.sessionToken;
+      console.log(
+        `${COLORS.green}[SESSION PASS]${COLORS.reset} ✔ Acquired! Pass ID: ${COLORS.bold}${pass.passId}${COLORS.reset}`,
+      );
+      console.log(
+        `${COLORS.dim}               Queries: ${pass.maxQueries} | Expires: ${pass.expiresAt}${COLORS.reset}\n`,
+      );
+    } catch (err) {
+      console.warn(
+        `${COLORS.yellow}[SESSION PASS]${COLORS.reset} ⚠️ Could not acquire: ${err instanceof Error ? err.message : String(err)}. Falling back to per-query x402.\n`,
+      );
+    }
+  }
+
   let cycle = 0;
   let capitalProtectedCount = 0;
   let swapsExecutedCount = 0;
@@ -153,13 +179,19 @@ export async function runAutonomousTrader(): Promise<void> {
       `${COLORS.cyan}[A2A PROTOCOL: STEP 1]${COLORS.reset} Querying Sentinel Risk Oracle...`,
     );
     console.log(
-      `         ${COLORS.dim}GET ${ORACLE_BASE_URL}/api/v1/oracle/risk?target=${tokenSymbol}&type=TOKEN${COLORS.reset}`,
+      `         ${COLORS.dim}GET ${ORACLE_BASE_URL}/api/v1/oracle/risk?target=${tokenSymbol}&type=TOKEN${activeSessionToken ? " [SESSION PASS]" : ""}${COLORS.reset}`,
     );
+
+    const queryHeaders: Record<string, string> = {};
+    if (activeSessionToken) {
+      queryHeaders["X-SESSION-TOKEN"] = activeSessionToken;
+    }
 
     let initialResponse: Response;
     try {
       initialResponse = await fetch(
         `${ORACLE_BASE_URL}/api/v1/oracle/risk?target=${tokenSymbol}&type=TOKEN`,
+        { headers: queryHeaders },
       );
     } catch (err) {
       console.error(
@@ -167,6 +199,59 @@ export async function runAutonomousTrader(): Promise<void> {
         err instanceof Error ? err.message : String(err),
       );
       console.error(`Ensure Sentinel backend is running (bun run dev)\n`);
+      return;
+    }
+
+    // Session Pass path: if we got 200 directly, skip payment
+    if (initialResponse.ok && activeSessionToken) {
+      const remaining = initialResponse.headers.get("X-Session-Remaining");
+      console.log(
+        `         ${COLORS.green}✔ Session Pass accepted! Remaining: ${remaining ?? "N/A"}${COLORS.reset}`,
+      );
+      const oracleResult =
+        (await initialResponse.json()) as OracleResponsePayload;
+
+      // Jump straight to verdict display (Step E)
+      await sleep(200);
+      try {
+        const verdict = oracleResult.oracleVerdict;
+        const telemetry = oracleResult.graphTelemetry;
+
+        console.log(
+          `\n${COLORS.bold}[ORACLE INTELLIGENCE REPORT FOR $${tokenSymbol}]:${COLORS.reset}`,
+        );
+        console.log(
+          `  • Verdict:          ${verdict.canExecute ? COLORS.green : COLORS.red}${COLORS.bold}${verdict.verdict}${COLORS.reset}`,
+        );
+        console.log(
+          `  • Risk Score:       ${verdict.riskScore >= 70 ? COLORS.red : COLORS.green}${COLORS.bold}${verdict.riskScore}/100${COLORS.reset} (Confidence: ${(verdict.confidence * 100).toFixed(0)}%)`,
+        );
+        console.log(
+          `  • Graph Telemetry:  ${telemetry.analyzedNodes} nodes traversed in ${telemetry.queryDurationMs}ms`,
+        );
+        console.log(
+          `  • Payment:          ${COLORS.magenta}Session Pass (zero-latency)${COLORS.reset}`,
+        );
+
+        if (verdict.canExecute) {
+          swapsExecutedCount++;
+          console.log(
+            `\n${COLORS.green}${COLORS.bold}✅ [DECISION: APPROVE SWAP] Token passed Sentinel safety inspection.${COLORS.reset}`,
+          );
+        } else {
+          capitalProtectedCount++;
+          console.log(
+            `\n${COLORS.red}${COLORS.bold}🚨 [DECISION: ABORT SWAP] Sentinel identified critical on-chain threat.${COLORS.reset}`,
+          );
+          console.log(
+            `   Anomalies Detected: ${verdict.detectedAnomalies.map((a) => `[${a.type}]`).join(", ")}`,
+          );
+        }
+      } catch (parseErr) {
+        console.error(
+          `${COLORS.red}❌ Failed to parse oracle response: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}${COLORS.reset}`,
+        );
+      }
       return;
     }
 
