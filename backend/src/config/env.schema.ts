@@ -19,12 +19,17 @@ export const EnvSchema = Type.Object({
     Type.String({ default: "sentinel.moove" }),
   ),
   MOOVE_TREASURY_ADDRESS: Type.Optional(
-    Type.String({ default: "SentinelTreasurySolanaDevnetAddress11111111" }),
+    Type.String({
+      default: "G7Vh9sJzWtjX3H1QdGWBCUWhZxoEVrBVmYGz27gSUnLj",
+    }),
   ),
   OPENAI_API_KEY: Type.Optional(Type.String()),
   OPENAI_MODEL: Type.Optional(Type.String({ default: "gpt-4o-mini" })),
   GEMINI_API_KEY: Type.Optional(Type.String()),
   GEMINI_MODEL: Type.Optional(Type.String({ default: "gemini-2.5-flash" })),
+  SOLANA_RPC_URL: Type.Optional(
+    Type.String({ default: "https://api.devnet.solana.com" }),
+  ),
 });
 
 export type EnvConfig = Static<typeof EnvSchema>;

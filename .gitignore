@@ -9,11 +9,13 @@ build/
 out/
 .next/
 
-# Environment
+# Environment & Keys
 .env
 .env.local
 .env.*.local
 *.env
+*.agent-wallet.json
+.agent-wallet.json
 
 # Logs
 npm-debug.log*

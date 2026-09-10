@@ -262,6 +262,55 @@ describe("X402PaymentGuard", () => {
     }
   });
 
+  it("live mode: accepts txSignature with linkId from Moove challenge (agent flow)", async () => {
+    const liveService = createLiveMooveService();
+    // Stub Solana RPC verification to simulate a successful on-chain settlement
+    liveService.verifySolanaTransaction = async () => true;
+    const liveGuard = new X402PaymentGuard(reflector, liveService);
+    reflector.getAllAndOverride = () => ({ amount: "0.0003", currency: "SOL" });
+    const challenge = liveService.mintChallenge(
+      "0.0003",
+      "SOL",
+      "https://pay.moove.xyz/test",
+      "link_agent_1",
+    );
+
+    const ctx = createMockContext({
+      "x-payment": JSON.stringify({
+        challengeId: challenge.challengeId,
+        txSignature: "5K9xAgentRealDevnetSig12345678901234567890",
+        payerAddress: "AgentWalletPublicKey11111111111111111111111111",
+        linkId: "link_agent_1",
+      }),
+    });
+    const canActivate = await liveGuard.canActivate(ctx);
+    expect(canActivate).toBe(true);
+  });
+
+  it("live mode: txSignature takes priority over linkId verification", async () => {
+    const liveService = createLiveMooveService({ link_stale: "active" });
+    // On-chain verification succeeds even though the Moove link is still active
+    liveService.verifySolanaTransaction = async () => true;
+    const liveGuard = new X402PaymentGuard(reflector, liveService);
+    reflector.getAllAndOverride = () => ({ amount: "0.0003", currency: "SOL" });
+    const challenge = liveService.mintChallenge(
+      "0.0003",
+      "SOL",
+      "https://pay.moove.xyz/test",
+      "link_stale",
+    );
+
+    const ctx = createMockContext({
+      "x-payment": JSON.stringify({
+        challengeId: challenge.challengeId,
+        txSignature: "5K9xAgentSettledOnChain123456789012345678",
+        linkId: "link_stale",
+      }),
+    });
+    const canActivate = await liveGuard.canActivate(ctx);
+    expect(canActivate).toBe(true);
+  });
+
   it("live mode: reports pending/completed through getPaymentStatus", async () => {
     const liveService = createLiveMooveService({
       link_live_wait: "active",

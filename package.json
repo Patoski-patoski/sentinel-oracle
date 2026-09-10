@@ -16,7 +16,8 @@
     "test": "bun --filter @sentinel/backend test",
     "prepare": "husky",
     "seed": "bun run backend/src/seed/seed-cli.ts",
-    "agent:demo": "bun run client-agent/demo-trader-bot.ts"
+    "agent:demo": "bun run client-agent/demo-trader-bot.ts",
+    "agent:live": "bun run client-agent/src/autonomous-trader.ts"
   },
   "devDependencies": {
     "@commitlint/cli": "^19.7.1",
