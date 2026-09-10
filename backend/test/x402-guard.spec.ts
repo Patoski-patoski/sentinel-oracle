@@ -10,6 +10,7 @@ import {
   type MooveLinkStatusResponse,
 } from "../src/moove/moove.service.js";
 import { ConfigService } from "../src/config/config.service.js";
+import { SessionPassService } from "../src/oracle/session-pass.service.js";
 import {
   PaymentRequiredException,
   InvalidPaymentException,
@@ -62,13 +63,15 @@ describe("X402PaymentGuard", () => {
   let reflector: Reflector;
   let mooveService: MooveService;
   let configService: ConfigService;
+  let sessionPassService: SessionPassService;
 
   beforeEach(() => {
     process.env["MOOVE_API_KEY"] = "mock";
     configService = new ConfigService();
     mooveService = new MooveService(configService);
+    sessionPassService = new SessionPassService(configService);
     reflector = new Reflector();
-    guard = new X402PaymentGuard(reflector, mooveService);
+    guard = new X402PaymentGuard(reflector, mooveService, sessionPassService);
   });
 
   function createMockContext(
@@ -79,11 +82,16 @@ describe("X402PaymentGuard", () => {
       headers,
     } as unknown as AuthenticatedPaymentRequest;
 
+    const response = {
+      setHeader: () => response,
+    };
+
     return {
       getHandler: () => ({}),
       getClass: () => ({}),
       switchToHttp: () => ({
         getRequest: () => request,
+        getResponse: () => response,
       }),
     } as unknown as ExecutionContext;
   }
@@ -144,7 +152,11 @@ describe("X402PaymentGuard", () => {
 
   it("live mode: rejects invented tx signatures with no linkId", async () => {
     const liveService = createLiveMooveService();
-    const liveGuard = new X402PaymentGuard(reflector, liveService);
+    const liveGuard = new X402PaymentGuard(
+      reflector,
+      liveService,
+      sessionPassService,
+    );
     reflector.getAllAndOverride = () => ({ amount: "0.0003", currency: "SOL" });
     const challenge = liveService.mintChallenge(
       "0.0003",
@@ -169,7 +181,11 @@ describe("X402PaymentGuard", () => {
 
   it("live mode: rejects receipts for unknown challenges", async () => {
     const liveService = createLiveMooveService();
-    const liveGuard = new X402PaymentGuard(reflector, liveService);
+    const liveGuard = new X402PaymentGuard(
+      reflector,
+      liveService,
+      sessionPassService,
+    );
     reflector.getAllAndOverride = () => ({ amount: "0.0003", currency: "SOL" });
 
     const ctx = createMockContext({
@@ -188,7 +204,11 @@ describe("X402PaymentGuard", () => {
 
   it("live mode: allows request when the Moove link is completed", async () => {
     const liveService = createLiveMooveService({ link_live_paid: "completed" });
-    const liveGuard = new X402PaymentGuard(reflector, liveService);
+    const liveGuard = new X402PaymentGuard(
+      reflector,
+      liveService,
+      sessionPassService,
+    );
     reflector.getAllAndOverride = () => ({ amount: "0.0003", currency: "SOL" });
     const challenge = liveService.mintChallenge(
       "0.0003",
@@ -209,7 +229,11 @@ describe("X402PaymentGuard", () => {
 
   it("live mode: surfaces HTTP 202 while the link is still active", async () => {
     const liveService = createLiveMooveService({ link_live_wait: "active" });
-    const liveGuard = new X402PaymentGuard(reflector, liveService);
+    const liveGuard = new X402PaymentGuard(
+      reflector,
+      liveService,
+      sessionPassService,
+    );
     reflector.getAllAndOverride = () => ({ amount: "0.0003", currency: "SOL" });
     const challenge = liveService.mintChallenge(
       "0.0003",
@@ -239,7 +263,11 @@ describe("X402PaymentGuard", () => {
     const liveService = createLiveMooveService({
       link_other_challenge: "completed",
     });
-    const liveGuard = new X402PaymentGuard(reflector, liveService);
+    const liveGuard = new X402PaymentGuard(
+      reflector,
+      liveService,
+      sessionPassService,
+    );
     reflector.getAllAndOverride = () => ({ amount: "0.0003", currency: "SOL" });
     const challenge = liveService.mintChallenge(
       "0.0003",
@@ -266,7 +294,11 @@ describe("X402PaymentGuard", () => {
     const liveService = createLiveMooveService();
     // Stub Solana RPC verification to simulate a successful on-chain settlement
     liveService.verifySolanaTransaction = async () => true;
-    const liveGuard = new X402PaymentGuard(reflector, liveService);
+    const liveGuard = new X402PaymentGuard(
+      reflector,
+      liveService,
+      sessionPassService,
+    );
     reflector.getAllAndOverride = () => ({ amount: "0.0003", currency: "SOL" });
     const challenge = liveService.mintChallenge(
       "0.0003",
@@ -291,7 +323,11 @@ describe("X402PaymentGuard", () => {
     const liveService = createLiveMooveService({ link_stale: "active" });
     // On-chain verification succeeds even though the Moove link is still active
     liveService.verifySolanaTransaction = async () => true;
-    const liveGuard = new X402PaymentGuard(reflector, liveService);
+    const liveGuard = new X402PaymentGuard(
+      reflector,
+      liveService,
+      sessionPassService,
+    );
     reflector.getAllAndOverride = () => ({ amount: "0.0003", currency: "SOL" });
     const challenge = liveService.mintChallenge(
       "0.0003",
@@ -343,5 +379,50 @@ describe("X402PaymentGuard", () => {
 
     const unknownStatus = await liveService.getPaymentStatus("ch_nope_missing");
     expect(unknownStatus.status).toBe("unknown");
+  });
+
+  it("session pass: allows immediate access and decrements remaining quota", async () => {
+    reflector.getAllAndOverride = () => ({ amount: "0.0003", currency: "SOL" });
+    const sessionToken = sessionPassService.generateToken(
+      "TestPayerAddress111",
+      5,
+    );
+
+    const ctx = createMockContext({
+      "x-session-token": sessionToken,
+    });
+
+    const canActivate = await guard.canActivate(ctx);
+    expect(canActivate).toBe(true);
+
+    const status = sessionPassService.getStatus(sessionToken);
+    expect(status?.remaining).toBe(4);
+  });
+
+  it("session pass: rejects corrupted or expired session token", async () => {
+    reflector.getAllAndOverride = () => ({ amount: "0.0003", currency: "SOL" });
+
+    const ctx = createMockContext({
+      "x-session-token": "corrupted_token_string_123",
+    });
+
+    try {
+      await guard.canActivate(ctx);
+      expect(true).toBe(false);
+    } catch (err) {
+      expect(err instanceof InvalidPaymentException).toBe(true);
+    }
+  });
+
+  it("session pass: pruneExpired cleans up expired and exhausted passes", async () => {
+    // Generate an already-expired pass (TTL = -1000ms)
+    sessionPassService.generateToken("PayerExpired", 10, -1000);
+
+    // Prune should find and delete it
+    const prunedCount = sessionPassService.pruneExpired();
+    expect(prunedCount).toBeGreaterThanOrEqual(1);
+
+    // Clean up timer
+    sessionPassService.onModuleDestroy();
   });
 });

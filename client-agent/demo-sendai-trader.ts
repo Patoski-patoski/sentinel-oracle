@@ -36,8 +36,8 @@ const C = {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  const useSession = args.includes("--session") || args.includes("-s");
   const targetArg = args.find((a) => !a.startsWith("-"));
+  const useSession = args.includes("--session") || args.includes("-s");
   const target = targetArg?.toUpperCase() ?? "MOON";
 
   console.log(

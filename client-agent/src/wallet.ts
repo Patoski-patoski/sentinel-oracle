@@ -204,28 +204,7 @@ export async function settlePaymentOnChain(
     return txSignature;
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    const balanceLamports = await connection.getBalance(keypair.publicKey);
-    if (balanceLamports < lamports) {
-      console.warn(
-        `[WALLET] ⚠️ Devnet wallet has insufficient balance (${(balanceLamports / LAMPORTS_PER_SOL).toFixed(4)} SOL). Signing offline with agent keypair...`,
-      );
-    } else {
-      console.warn(
-        `[WALLET] ⚠️ RPC broadcast warning: ${errMsg}. Fallback signing with agent keypair...`,
-      );
-    }
-    try {
-      const { blockhash } = await connection.getLatestBlockhash("confirmed");
-      transaction.recentBlockhash = blockhash;
-      transaction.feePayer = keypair.publicKey;
-      transaction.sign(keypair);
-      const rawSignature = transaction.signature;
-      if (rawSignature) {
-        return bs58.encode(rawSignature);
-      }
-    } catch {
-      // Fall back to generated signature
-    }
+    console.error(`[WALLET] ❌ On-chain payment settlement failed: ${errMsg}`);
     throw err;
   }
 }

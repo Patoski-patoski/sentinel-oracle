@@ -30,6 +30,11 @@ export const EnvSchema = Type.Object({
   SOLANA_RPC_URL: Type.Optional(
     Type.String({ default: "https://api.devnet.solana.com" }),
   ),
+  SOLANA_WS_URL: Type.Optional(Type.String()),
+  INGESTION_MODE: Type.Optional(Type.String()),
+  SESSION_PASS_SECRET: Type.Optional(
+    Type.String({ default: "sentinel-session-secret-dev" }),
+  ),
 });
 
 export type EnvConfig = Static<typeof EnvSchema>;

@@ -151,7 +151,7 @@ export async function runAutonomousTrader(): Promise<void> {
       );
     } catch (err) {
       console.warn(
-        `${COLORS.yellow}[SESSION PASS]${COLORS.reset} ⚠️ Could not acquire: ${err instanceof Error ? err.message : String(err)}. Falling back to per-query x402.\n`,
+        `${COLORS.yellow}[SESSION PASS]${COLORS.reset} ⚠️ Could not acquire session pass: ${err instanceof Error ? err.message : String(err)}. Falling back to per-query x402.\n`,
       );
     }
   }
@@ -202,165 +202,120 @@ export async function runAutonomousTrader(): Promise<void> {
       return;
     }
 
-    // Session Pass path: if we got 200 directly, skip payment
+    let oracleResult: OracleResponsePayload;
+
     if (initialResponse.ok && activeSessionToken) {
-      const remaining = initialResponse.headers.get("X-Session-Remaining");
+      const remaining =
+        initialResponse.headers.get("X-Session-Remaining") ?? "N/A";
       console.log(
-        `         ${COLORS.green}✔ Session Pass accepted! Remaining: ${remaining ?? "N/A"}${COLORS.reset}`,
+        `         ${COLORS.green}${COLORS.bold}HTTP 200 OK — Session Pass Verified! Remaining quota: ${remaining}${COLORS.reset}`,
       );
-      const oracleResult =
-        (await initialResponse.json()) as OracleResponsePayload;
+      oracleResult = (await initialResponse.json()) as OracleResponsePayload;
+    } else if (initialResponse.status === 402) {
+      // Step B: Handle HTTP 402 Payment Required Challenge
+      const challengePayload =
+        (await initialResponse.json()) as PaymentChallengePayload;
+      const challenge = challengePayload.challenge;
 
-      // Jump straight to verdict display (Step E)
-      await sleep(200);
+      console.log(
+        `\n${COLORS.yellow}[A2A PROTOCOL: STEP 2] HTTP 402 Payment Required received!${COLORS.reset}`,
+      );
+      console.log(
+        `         Protocol:        ${COLORS.magenta}${initialResponse.headers.get("x-payment-protocol") ?? "moove-x402-v1"}${COLORS.reset}`,
+      );
+      console.log(
+        `         Challenge ID:    ${COLORS.bold}${challenge.challengeId}${COLORS.reset}`,
+      );
+      console.log(
+        `         Invoice Amount:  ${COLORS.bold}${challenge.amount} ${challenge.currency}${COLORS.reset}`,
+      );
+      console.log(
+        `         Settlement Rail: Solana Devnet -> ${challenge.recipientAddress.substring(0, 16)}...`,
+      );
+
+      await sleep(400);
+
+      // Step C: Autonomous Micro-Payment Settlement on Solana
+      console.log(
+        `\n${COLORS.cyan}[A2A PROTOCOL: STEP 3] Signing & broadcasting on-chain micro-payment...${COLORS.reset}`,
+      );
+
+      let txSignature: string;
       try {
-        const verdict = oracleResult.oracleVerdict;
-        const telemetry = oracleResult.graphTelemetry;
-
-        console.log(
-          `\n${COLORS.bold}[ORACLE INTELLIGENCE REPORT FOR $${tokenSymbol}]:${COLORS.reset}`,
+        txSignature = await settlePaymentOnChain(
+          connection,
+          wallet.keypair,
+          challenge.recipientAddress,
+          parseFloat(challenge.amount),
+          challenge.linkId,
         );
         console.log(
-          `  • Verdict:          ${verdict.canExecute ? COLORS.green : COLORS.red}${COLORS.bold}${verdict.verdict}${COLORS.reset}`,
+          `         ${COLORS.green}✔ Transaction confirmed on Solana Devnet!${COLORS.reset}`,
         );
         console.log(
-          `  • Risk Score:       ${verdict.riskScore >= 70 ? COLORS.red : COLORS.green}${COLORS.bold}${verdict.riskScore}/100${COLORS.reset} (Confidence: ${(verdict.confidence * 100).toFixed(0)}%)`,
+          `         Tx Hash: ${COLORS.dim}${txSignature}${COLORS.reset}`,
         );
         console.log(
-          `  • Graph Telemetry:  ${telemetry.analyzedNodes} nodes traversed in ${telemetry.queryDurationMs}ms`,
+          `         Explorer: ${COLORS.cyan}https://explorer.solana.com/tx/${txSignature}?cluster=devnet${COLORS.reset}`,
         );
-        console.log(
-          `  • Payment:          ${COLORS.magenta}Session Pass (zero-latency)${COLORS.reset}`,
-        );
-
-        if (verdict.canExecute) {
-          swapsExecutedCount++;
+        if (challenge.linkId) {
           console.log(
-            `\n${COLORS.green}${COLORS.bold}✅ [DECISION: APPROVE SWAP] Token passed Sentinel safety inspection.${COLORS.reset}`,
-          );
-        } else {
-          capitalProtectedCount++;
-          console.log(
-            `\n${COLORS.red}${COLORS.bold}🚨 [DECISION: ABORT SWAP] Sentinel identified critical on-chain threat.${COLORS.reset}`,
-          );
-          console.log(
-            `   Anomalies Detected: ${verdict.detectedAnomalies.map((a) => `[${a.type}]`).join(", ")}`,
+            `         Moove Reference: ${COLORS.magenta}${challenge.linkId}${COLORS.reset}`,
           );
         }
-      } catch (parseErr) {
+      } catch (paymentErr) {
         console.error(
-          `${COLORS.red}❌ Failed to parse oracle response: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}${COLORS.reset}`,
+          `         ${COLORS.red}❌ On-chain payment settlement failed: ${paymentErr instanceof Error ? paymentErr.message : String(paymentErr)}${COLORS.reset}`,
         );
-      }
-      return;
-    }
-
-    // Step B: Handle HTTP 402 Payment Required Challenge
-    if (initialResponse.status !== 402) {
-      console.warn(`Unexpected HTTP status: ${initialResponse.status}`);
-      return;
-    }
-
-    const challengePayload =
-      (await initialResponse.json()) as PaymentChallengePayload;
-    const challenge = challengePayload.challenge;
-
-    console.log(
-      `\n${COLORS.yellow}[A2A PROTOCOL: STEP 2] HTTP 402 Payment Required received!${COLORS.reset}`,
-    );
-    console.log(
-      `         Protocol:        ${COLORS.magenta}${initialResponse.headers.get("x-payment-protocol") ?? "moove-x402-v1"}${COLORS.reset}`,
-    );
-    console.log(
-      `         Challenge ID:    ${COLORS.bold}${challenge.challengeId}${COLORS.reset}`,
-    );
-    console.log(
-      `         Invoice Amount:  ${COLORS.bold}${challenge.amount} ${challenge.currency}${COLORS.reset}`,
-    );
-    console.log(
-      `         Settlement Rail: Solana Devnet -> ${challenge.recipientAddress.substring(0, 16)}...`,
-    );
-
-    await sleep(400);
-
-    // Step C: Autonomous Micro-Payment Settlement on Solana
-    console.log(
-      `\n${COLORS.cyan}[A2A PROTOCOL: STEP 3] Signing & broadcasting on-chain micro-payment...${COLORS.reset}`,
-    );
-
-    let txSignature: string;
-    try {
-      txSignature = await settlePaymentOnChain(
-        connection,
-        wallet.keypair,
-        challenge.recipientAddress,
-        parseFloat(challenge.amount),
-        challenge.linkId,
-      );
-      console.log(
-        `         ${COLORS.green}✔ Transaction confirmed on Solana Devnet!${COLORS.reset}`,
-      );
-      console.log(
-        `         Tx Hash: ${COLORS.dim}${txSignature}${COLORS.reset}`,
-      );
-      console.log(
-        `         Explorer: ${COLORS.cyan}https://explorer.solana.com/tx/${txSignature}?cluster=devnet${COLORS.reset}`,
-      );
-      if (challenge.linkId) {
-        console.log(
-          `         Moove Reference: ${COLORS.magenta}${challenge.linkId}${COLORS.reset}`,
-        );
-      }
-    } catch (paymentErr) {
-      console.error(
-        `         ${COLORS.red}❌ On-chain payment settlement failed: ${paymentErr instanceof Error ? paymentErr.message : String(paymentErr)}${COLORS.reset}`,
-      );
-      return;
-    }
-
-    await sleep(500);
-
-    // Step D: Re-submitting Oracle Request with On-Chain Proof
-    console.log(
-      `\n${COLORS.cyan}[A2A PROTOCOL: STEP 4] Re-submitting query with X-PAYMENT cryptographic receipt...${COLORS.reset}`,
-    );
-
-    const receipt = {
-      challengeId: challenge.challengeId,
-      txSignature,
-      payerAddress: wallet.publicKey,
-      ...(challenge.linkId ? { linkId: challenge.linkId } : {}),
-    };
-
-    let oracleResult: OracleResponsePayload;
-    try {
-      const oracleResponse = await fetch(
-        `${ORACLE_BASE_URL}/api/v1/oracle/risk?target=${tokenSymbol}&type=TOKEN`,
-        {
-          headers: {
-            "X-PAYMENT": JSON.stringify(receipt),
-          },
-        },
-      );
-
-      if (!oracleResponse.ok) {
-        console.error(
-          `${COLORS.red}❌ Oracle returned HTTP ${oracleResponse.status}${COLORS.reset}`,
-        );
-        console.error(await oracleResponse.text());
         return;
       }
 
-      oracleResult = (await oracleResponse.json()) as OracleResponsePayload;
-    } catch (networkErr) {
-      console.error(
-        `${COLORS.red}❌ Failed to reach Sentinel Oracle after payment: ${networkErr instanceof Error ? networkErr.message : String(networkErr)}${COLORS.reset}`,
+      await sleep(500);
+
+      // Step D: Re-submitting Oracle Request with On-Chain Proof
+      console.log(
+        `\n${COLORS.cyan}[A2A PROTOCOL: STEP 4] Re-submitting query with X-PAYMENT cryptographic receipt...${COLORS.reset}`,
       );
+
+      const receipt = {
+        challengeId: challenge.challengeId,
+        txSignature,
+        payerAddress: wallet.publicKey,
+        ...(challenge.linkId ? { linkId: challenge.linkId } : {}),
+      };
+
+      try {
+        const oracleResponse = await fetch(
+          `${ORACLE_BASE_URL}/api/v1/oracle/risk?target=${tokenSymbol}&type=TOKEN`,
+          {
+            headers: {
+              "X-PAYMENT": JSON.stringify(receipt),
+            },
+          },
+        );
+
+        if (!oracleResponse.ok) {
+          console.error(
+            `${COLORS.red}❌ Oracle returned HTTP ${oracleResponse.status}${COLORS.reset}`,
+          );
+          console.error(await oracleResponse.text());
+          return;
+        }
+
+        oracleResult = (await oracleResponse.json()) as OracleResponsePayload;
+      } catch (networkErr) {
+        console.error(
+          `${COLORS.red}❌ Failed to reach Sentinel Oracle after payment: ${networkErr instanceof Error ? networkErr.message : String(networkErr)}${COLORS.reset}`,
+        );
+        return;
+      }
+      console.log(
+        `         ${COLORS.green}${COLORS.bold}HTTP 200 OK — Payment Verified by Sentinel! Risk payload unlocked.${COLORS.reset}`,
+      );
+    } else {
+      console.warn(`Unexpected HTTP status: ${initialResponse.status}`);
       return;
     }
-    console.log(
-      `         ${COLORS.green}${COLORS.bold}HTTP 200 OK — Payment Verified by Sentinel! Risk payload unlocked.${COLORS.reset}`,
-    );
 
     await sleep(400);
 

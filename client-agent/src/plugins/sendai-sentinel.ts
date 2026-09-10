@@ -4,18 +4,17 @@
  * Provides autonomous AI trading agents with pre-flight risk assessment
  * via the Sentinel Oracle x402 protocol. Supports:
  *
- * 1. `assessTokenRisk` — Full 402 challenge → payment → risk verdict flow
+ * 1. `assessTokenRisk` — Full 402 challenge → payment → risk verdict flow (or session-token fast-path)
  * 2. `buySessionPass`  — Purchase a bulk session pass (100 queries / 24h)
  * 3. `safeSwap`        — Assess risk + execute Jupiter swap only if safe
+ * 4. `createSentinelTools` — Returns bound executable AI tools for LangChain / Vercel AI SDK
  *
  * Usage with SendAI's solana-agent-kit:
  * ```typescript
  * import { SolanaAgentKit } from "solana-agent-kit";
- * import { SentinelPlugin, createSentinelTools } from "./plugins/sendai-sentinel.js";
+ * import { createSentinelTools } from "./plugins/sendai-sentinel.js";
  *
- * const agent = new SolanaAgentKit(wallet, RPC_URL, {});
- * agent.use(SentinelPlugin);
- * const tools = createSentinelTools(agent);
+ * const tools = createSentinelTools(connection, keypair, { oracleUrl });
  * ```
  */
 
@@ -29,7 +28,7 @@ import {
   sendAndConfirmTransaction,
   LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
-import bs58 from "bs58";
+import { getJupiterQuote, executeDEXSwap } from "../jupiter.js";
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
@@ -115,10 +114,19 @@ export interface SafeSwapResult {
   oracleResponse?: OracleResponse;
 }
 
+export interface ExecutableSentinelTool {
+  name: string;
+  description: string;
+  schema: Record<string, unknown>;
+  execute: (input?: Record<string, unknown>) => Promise<unknown>;
+}
+
 // ─── Core Functions ─────────────────────────────────────────────────────────
 
 /**
  * Settles a micro-payment on-chain to the Sentinel Oracle treasury.
+ * Strictly sends and confirms transaction on-chain; propagates broadcast error
+ * without returning unbroadcast offline signatures (Comment 4).
  */
 async function settlePayment(
   connection: Connection,
@@ -160,30 +168,15 @@ async function settlePayment(
     );
   }
 
-  try {
-    return await sendAndConfirmTransaction(connection, transaction, [keypair], {
-      commitment: "confirmed",
-    });
-  } catch (err) {
-    // Fallback: sign offline and return the signature
-    const { blockhash } = await connection.getLatestBlockhash("confirmed");
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = keypair.publicKey;
-    transaction.sign(keypair);
-    const rawSignature = transaction.signature;
-    if (rawSignature) {
-      return bs58.encode(rawSignature);
-    }
-    throw err;
-  }
+  return await sendAndConfirmTransaction(connection, transaction, [keypair], {
+    commitment: "confirmed",
+  });
 }
 
 /**
- * Assess token risk through the full x402 flow:
- * 1. Query Sentinel Oracle (receives 402 challenge)
- * 2. Auto-settle micro-payment on Solana
- * 3. Re-query with payment proof
- * 4. Return structured risk verdict
+ * Assess token risk through the Sentinel Oracle:
+ * - If sessionToken is provided, uses fast-path with X-SESSION-TOKEN header.
+ * - Otherwise executes standard x402 challenge -> payment -> verify flow.
  */
 export async function assessTokenRisk(
   connection: Connection,
@@ -202,18 +195,17 @@ export async function assessTokenRisk(
   }
   const endpoint = `${oracleUrl}/api/v1/oracle/risk?${queryParams.toString()}`;
 
-  // ── Session Pass Fast Path ────────────────────────────────────────
+  // ── Fast Path: Active Session Token ─────────────────────────────────
   if (config?.sessionToken) {
-    const response = await fetch(endpoint, {
+    const sessionRes = await fetch(endpoint, {
       headers: { "X-SESSION-TOKEN": config.sessionToken },
     });
-    if (response.ok) {
-      return (await response.json()) as OracleResponse;
+    if (sessionRes.ok) {
+      return (await sessionRes.json()) as OracleResponse;
     }
-    // If session expired/invalid, fall through to payment flow
   }
 
-  // ── Step 1: Trigger 402 Challenge ─────────────────────────────────
+  // ── Step 1: Trigger 402 Challenge ───────────────────────────────────
   const initialResponse = await fetch(endpoint);
   if (initialResponse.status !== 402) {
     throw new Error(
@@ -226,10 +218,10 @@ export async function assessTokenRisk(
   };
   const challenge = challengeBody.challenge;
 
-  // ── Step 2: Settle On-Chain Micro-Payment ─────────────────────────
+  // ── Step 2: Settle On-Chain Micro-Payment ───────────────────────────
   const txSignature = await settlePayment(connection, keypair, challenge);
 
-  // ── Step 3: Re-Query with Payment Proof ───────────────────────────
+  // ── Step 3: Re-Query with Payment Proof ─────────────────────────────
   const receipt = {
     challengeId: challenge.challengeId,
     txSignature,
@@ -253,6 +245,7 @@ export async function assessTokenRisk(
 
 /**
  * Purchase a Session Pass: pay 0.01 SOL once for 100 queries / 24h.
+ * Requests challenge from backend, settles on-chain, and claims signed token (Comment 1).
  */
 export async function buySessionPass(
   connection: Connection,
@@ -303,6 +296,7 @@ export async function buySessionPass(
 
 /**
  * Safe Swap: Assess risk first, execute swap only if verdict is safe.
+ * Builds and submits Jupiter swap; returns swapExecuted: false with error if failed (Comment 3).
  */
 export async function safeSwap(
   connection: Connection,
@@ -331,26 +325,47 @@ export async function safeSwap(
     };
   }
 
-  return {
-    assessed: true,
-    verdict,
-    swapExecuted: true,
-    reason: `Risk score ${verdict.riskScore}/100 is within threshold. Safe to swap.`,
-    oracleResponse,
-  };
+  // Verdict is safe — build and submit the Jupiter swap
+  try {
+    const quote = await getJupiterQuote("SOL", input.target, input.amountSol);
+    const swapResult = await executeDEXSwap(
+      connection,
+      keypair,
+      "SOL",
+      input.target,
+      input.amountSol,
+      quote,
+    );
+
+    return {
+      assessed: true,
+      verdict,
+      swapExecuted: true,
+      reason: `Risk score ${verdict.riskScore}/100 is within threshold. Swap executed on-chain: ${swapResult.txSignature}`,
+      oracleResponse,
+    };
+  } catch (swapErr) {
+    const errMsg = swapErr instanceof Error ? swapErr.message : String(swapErr);
+    return {
+      assessed: true,
+      verdict,
+      swapExecuted: false,
+      reason: `Risk assessment passed, but swap execution failed: ${errMsg}`,
+      oracleResponse,
+    };
+  }
 }
 
 // ─── SendAI Plugin Interface ────────────────────────────────────────────────
 
 /**
- * SendAI-compatible action definitions for the Sentinel Oracle.
- * Each action follows the solana-agent-kit plugin pattern.
+ * Action metadata descriptors for SendAI solana-agent-kit.
  */
 export const sentinelActions = {
   assessTokenRisk: {
     name: "sentinel_assess_token_risk",
     description:
-      "Check a token or wallet for on-chain fraud patterns (wash trading loops, Sybil sniping farms, laundering peeling chains) using the Sentinel Risk Oracle. Pays a micro-payment via HTTP 402 x402 protocol.",
+      "Check a token or wallet for on-chain fraud patterns (wash trading loops, Sybil sniping farms, laundering peeling chains) using the Sentinel Risk Oracle. Pays a micro-payment via HTTP 402 x402 protocol or uses active session pass.",
     schema: {
       type: "object" as const,
       properties: {
@@ -367,7 +382,6 @@ export const sentinelActions = {
       },
       required: ["target"],
     },
-    execute: assessTokenRisk,
   },
   buySessionPass: {
     name: "sentinel_buy_session_pass",
@@ -378,7 +392,6 @@ export const sentinelActions = {
       properties: {},
       required: [] as string[],
     },
-    execute: buySessionPass,
   },
   safeSwap: {
     name: "sentinel_safe_swap",
@@ -403,23 +416,58 @@ export const sentinelActions = {
       },
       required: ["target", "amountSol"],
     },
-    execute: safeSwap,
   },
 };
 
 /**
- * Create Sentinel tools compatible with LangChain / Vercel AI SDK.
- * Returns an array of tool definitions that can be passed to
- * `createVercelAITools()` or `createLangchainTools()`.
+ * Returns bound executable AI tools capturing connection, keypair, and config.
+ * Compatible with SendAI / LangChain / Vercel AI SDK adapters (Comment 5).
  */
-export function createSentinelTools(_config?: SentinelPluginConfig): Array<{
-  name: string;
-  description: string;
-  schema: Record<string, unknown>;
-}> {
-  return Object.values(sentinelActions).map((action) => ({
-    name: action.name,
-    description: action.description,
-    schema: action.schema,
-  }));
+export function createSentinelTools(
+  connection: Connection,
+  keypair: Keypair,
+  config?: SentinelPluginConfig,
+): ExecutableSentinelTool[] {
+  return [
+    {
+      name: sentinelActions.assessTokenRisk.name,
+      description: sentinelActions.assessTokenRisk.description,
+      schema: sentinelActions.assessTokenRisk.schema,
+      execute: async (input?: Record<string, unknown>) => {
+        const target =
+          typeof input?.["target"] === "string" ? input["target"] : "MOON";
+        const type = input?.["type"] === "WALLET" ? "WALLET" : "TOKEN";
+        return assessTokenRisk(connection, keypair, { target, type }, config);
+      },
+    },
+    {
+      name: sentinelActions.buySessionPass.name,
+      description: sentinelActions.buySessionPass.description,
+      schema: sentinelActions.buySessionPass.schema,
+      execute: async () => {
+        return buySessionPass(connection, keypair, config);
+      },
+    },
+    {
+      name: sentinelActions.safeSwap.name,
+      description: sentinelActions.safeSwap.description,
+      schema: sentinelActions.safeSwap.schema,
+      execute: async (input?: Record<string, unknown>) => {
+        const target =
+          typeof input?.["target"] === "string" ? input["target"] : "MOON";
+        const amountSol =
+          typeof input?.["amountSol"] === "number" ? input["amountSol"] : 0.01;
+        const maxRiskScore =
+          typeof input?.["maxRiskScore"] === "number"
+            ? input["maxRiskScore"]
+            : 50;
+        return safeSwap(
+          connection,
+          keypair,
+          { target, amountSol, maxRiskScore },
+          config,
+        );
+      },
+    },
+  ];
 }
