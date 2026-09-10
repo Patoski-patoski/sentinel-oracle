@@ -5,8 +5,7 @@
  * via the Sentinel Oracle x402 protocol. Supports:
  *
  * 1. `assessTokenRisk` — Full 402 challenge → payment → risk verdict flow
- * 2. `buySessionPass`  — Purchase a bulk session pass (100 queries / 24h)
- * 3. `safeSwap`        — Assess risk + execute Jupiter swap only if safe
+ * 2. `safeSwap`        — Assess risk + execute Jupiter swap only if safe
  *
  * Usage with SendAI's solana-agent-kit:
  * ```typescript
@@ -29,7 +28,7 @@ import {
   sendAndConfirmTransaction,
   LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
-import bs58 from "bs58";
+import { getJupiterQuote, executeDEXSwap } from "../jupiter.js";
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
@@ -41,7 +40,6 @@ const SENTINEL_ORACLE_URL =
 export interface SentinelPluginConfig {
   oracleUrl?: string;
   autoPayment?: boolean;
-  sessionToken?: string;
 }
 
 export interface PaymentChallenge {
@@ -86,13 +84,6 @@ export interface OracleResponse {
     queryDurationMs: number;
   };
   agentSemanticContext: string;
-}
-
-export interface SessionPassInfo {
-  sessionToken: string;
-  passId: string;
-  maxQueries: number;
-  expiresAt: string;
 }
 
 export interface AssessRiskInput {
@@ -160,22 +151,9 @@ async function settlePayment(
     );
   }
 
-  try {
-    return await sendAndConfirmTransaction(connection, transaction, [keypair], {
-      commitment: "confirmed",
-    });
-  } catch (err) {
-    // Fallback: sign offline and return the signature
-    const { blockhash } = await connection.getLatestBlockhash("confirmed");
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = keypair.publicKey;
-    transaction.sign(keypair);
-    const rawSignature = transaction.signature;
-    if (rawSignature) {
-      return bs58.encode(rawSignature);
-    }
-    throw err;
-  }
+  return await sendAndConfirmTransaction(connection, transaction, [keypair], {
+    commitment: "confirmed",
+  });
 }
 
 /**
@@ -201,17 +179,6 @@ export async function assessTokenRisk(
     queryParams.set("minAmount", input.minAmount.toString());
   }
   const endpoint = `${oracleUrl}/api/v1/oracle/risk?${queryParams.toString()}`;
-
-  // ── Session Pass Fast Path ────────────────────────────────────────
-  if (config?.sessionToken) {
-    const response = await fetch(endpoint, {
-      headers: { "X-SESSION-TOKEN": config.sessionToken },
-    });
-    if (response.ok) {
-      return (await response.json()) as OracleResponse;
-    }
-    // If session expired/invalid, fall through to payment flow
-  }
 
   // ── Step 1: Trigger 402 Challenge ─────────────────────────────────
   const initialResponse = await fetch(endpoint);
@@ -252,56 +219,6 @@ export async function assessTokenRisk(
 }
 
 /**
- * Purchase a Session Pass: pay 0.01 SOL once for 100 queries / 24h.
- */
-export async function buySessionPass(
-  connection: Connection,
-  keypair: Keypair,
-  config?: SentinelPluginConfig,
-): Promise<SessionPassInfo> {
-  const oracleUrl = config?.oracleUrl ?? SENTINEL_ORACLE_URL;
-
-  // Step 1: Request session pass challenge
-  const challengeResponse = await fetch(
-    `${oracleUrl}/api/v1/oracle/pass/challenge`,
-    { method: "POST" },
-  );
-
-  if (!challengeResponse.ok) {
-    throw new Error(
-      `Failed to request session pass challenge: HTTP ${challengeResponse.status}`,
-    );
-  }
-
-  const challenge = (await challengeResponse.json()) as PaymentChallenge;
-
-  // Step 2: Settle on-chain
-  const txSignature = await settlePayment(connection, keypair, challenge);
-
-  // Step 3: Claim the session pass
-  const receipt = {
-    challengeId: challenge.challengeId,
-    txSignature,
-    payerAddress: keypair.publicKey.toBase58(),
-    ...(challenge.linkId ? { linkId: challenge.linkId } : {}),
-  };
-
-  const claimResponse = await fetch(`${oracleUrl}/api/v1/oracle/pass/claim`, {
-    method: "POST",
-    headers: { "X-PAYMENT": JSON.stringify(receipt) },
-  });
-
-  if (!claimResponse.ok) {
-    const errorText = await claimResponse.text();
-    throw new Error(
-      `Failed to claim session pass (HTTP ${claimResponse.status}): ${errorText}`,
-    );
-  }
-
-  return (await claimResponse.json()) as SessionPassInfo;
-}
-
-/**
  * Safe Swap: Assess risk first, execute swap only if verdict is safe.
  */
 export async function safeSwap(
@@ -331,11 +248,22 @@ export async function safeSwap(
     };
   }
 
+  // Verdict is safe — execute Jupiter swap
+  const quote = await getJupiterQuote("SOL", input.target, input.amountSol);
+  const swapResult = await executeDEXSwap(
+    connection,
+    keypair,
+    "SOL",
+    input.target,
+    input.amountSol,
+    quote,
+  );
+
   return {
     assessed: true,
     verdict,
     swapExecuted: true,
-    reason: `Risk score ${verdict.riskScore}/100 is within threshold. Safe to swap.`,
+    reason: `Risk score ${verdict.riskScore}/100 within threshold. Swap recorded on-chain: ${swapResult.txSignature}`,
     oracleResponse,
   };
 }
@@ -368,17 +296,6 @@ export const sentinelActions = {
       required: ["target"],
     },
     execute: assessTokenRisk,
-  },
-  buySessionPass: {
-    name: "sentinel_buy_session_pass",
-    description:
-      "Purchase a Sentinel Session Pass (0.01 SOL) for 100 risk queries within 24 hours. Eliminates per-query settlement overhead for high-frequency trading agents.",
-    schema: {
-      type: "object" as const,
-      properties: {},
-      required: [] as string[],
-    },
-    execute: buySessionPass,
   },
   safeSwap: {
     name: "sentinel_safe_swap",
@@ -416,10 +333,12 @@ export function createSentinelTools(_config?: SentinelPluginConfig): Array<{
   name: string;
   description: string;
   schema: Record<string, unknown>;
+  execute: (...args: unknown[]) => Promise<unknown>;
 }> {
   return Object.values(sentinelActions).map((action) => ({
     name: action.name,
     description: action.description,
     schema: action.schema,
+    execute: action.execute as (...args: unknown[]) => Promise<unknown>,
   }));
 }
