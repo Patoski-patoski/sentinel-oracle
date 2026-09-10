@@ -14,6 +14,7 @@ import { Connection, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { getOrCreateAgentWallet, ensureWalletFunded } from "./src/wallet.js";
 import {
   assessTokenRisk,
+  buySessionPass,
   type SentinelPluginConfig,
 } from "./src/plugins/sendai-sentinel.js";
 
@@ -36,6 +37,7 @@ const C = {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const targetArg = args.find((a) => !a.startsWith("-"));
+  const useSession = args.includes("--session") || args.includes("-s");
   const target = targetArg?.toUpperCase() ?? "MOON";
 
   console.log(
@@ -44,7 +46,9 @@ async function main(): Promise<void> {
   console.log(
     `${C.bold}🛡️  SENTINEL × SENDAI AUTONOMOUS TRADER DEMO${C.reset}`,
   );
-  console.log(`${C.dim}Plugin: sendai-sentinel | Target: $${target}${C.reset}`);
+  console.log(
+    `${C.dim}Plugin: sendai-sentinel | Target: $${target} | Session Pass: ${useSession ? "YES" : "NO"}${C.reset}`,
+  );
   console.log(
     `${C.cyan}════════════════════════════════════════════════════════════════════════${C.reset}\n`,
   );
@@ -69,6 +73,35 @@ async function main(): Promise<void> {
     oracleUrl: ORACLE_URL,
     autoPayment: true,
   };
+
+  // ── Optional: Buy Session Pass ──────────────────────────────────────
+  if (useSession) {
+    console.log(
+      `${C.magenta}[SESSION PASS]${C.reset} Purchasing bulk session pass (0.01 SOL → 100 queries / 24h)...`,
+    );
+
+    try {
+      const pass = await buySessionPass(
+        connection,
+        wallet.keypair,
+        pluginConfig,
+      );
+      pluginConfig.sessionToken = pass.sessionToken;
+      console.log(
+        `${C.green}[SESSION PASS]${C.reset} ✔ Acquired! Pass ID: ${C.bold}${pass.passId}${C.reset}`,
+      );
+      console.log(
+        `${C.dim}               Queries: ${pass.maxQueries} | Expires: ${pass.expiresAt}${C.reset}\n`,
+      );
+    } catch (err) {
+      console.warn(
+        `${C.yellow}[SESSION PASS]${C.reset} ⚠️ Could not acquire session pass: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      console.warn(
+        `${C.dim}               Falling back to per-query x402 payment...${C.reset}\n`,
+      );
+    }
+  }
 
   // ── Sentinel Risk Assessment ────────────────────────────────────────
   console.log(

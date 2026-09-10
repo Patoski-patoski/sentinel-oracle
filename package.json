@@ -17,7 +17,9 @@
     "prepare": "husky",
     "seed": "bun run backend/src/seed/seed-cli.ts",
     "agent:demo": "bun run client-agent/demo-trader-bot.ts",
-    "agent:live": "bun run client-agent/src/autonomous-trader.ts"
+    "agent:live": "bun run client-agent/src/autonomous-trader.ts",
+    "agent:sendai": "bun run client-agent/demo-sendai-trader.ts",
+    "agent:session": "bun run client-agent/src/autonomous-trader.ts --session"
   },
   "devDependencies": {
     "@commitlint/cli": "^19.7.1",

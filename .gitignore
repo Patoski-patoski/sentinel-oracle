@@ -36,5 +36,6 @@ Thumbs.db
 coverage/
 .nyc_output/
 moove-agentic-payments-gemini-cli
-SENTINEL_BLUEPRINT.node_md
+SENTINEL_BLUEPRINT.md
 brainstorm.md
+TWITTER_PLAYBOOK.md
