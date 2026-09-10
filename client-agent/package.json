@@ -2,7 +2,16 @@
   "name": "@sentinel/client-agent",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
-    "start": "bun run demo-trader-bot.ts"
+    "start": "bun run demo-trader-bot.ts",
+    "live": "bun run src/autonomous-trader.ts"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.99.0",
+    "bs58": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.5.0"
   }
 }

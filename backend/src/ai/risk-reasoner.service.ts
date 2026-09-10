@@ -1,4 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
+import { GoogleGenAI } from "@google/genai";
 import { ConfigService } from "../config/config.service.js";
 import type { GraphAnalysisResult } from "../database/cognoDB.service.js";
 
@@ -154,6 +155,9 @@ export class RiskReasonerService {
     anomalies: AnomalyDetail[],
   ): Promise<string> {
     const apiKey = this.configService.get("GEMINI_API_KEY")?.trim();
+    if (!apiKey) {
+      return "";
+    }
     const model = (
       this.configService.get("GEMINI_MODEL") ?? "gemini-2.5-flash"
     ).trim();
@@ -168,39 +172,18 @@ Synthesize the following graph telemetry for token $${target}:
 
 Output a concise 2-sentence risk directive tailored for an autonomous client bot.`;
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await ai.models.generateContent({
+      model,
+      contents: prompt,
+      config: {
+        temperature: 0.2,
+        maxOutputTokens: 1000,
+        thinkingConfig: { thinkingBudget: 0 },
       },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [{ text: prompt }],
-          },
-        ],
-        generationConfig: {
-          temperature: 0.2,
-          maxOutputTokens: 1000,
-          thinkingConfig: { thinkingBudget: 0 },
-        },
-      }),
     });
 
-    if (!res.ok) {
-      throw new Error(`Gemini API HTTP ${res.status}: ${await res.text()}`);
-    }
-
-    const data = (await res.json()) as {
-      candidates?: Array<{
-        content?: {
-          parts?: Array<{ text?: string }>;
-        };
-      }>;
-    };
-
-    return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
+    return response.text?.trim() ?? "";
   }
 
   private async callOpenAI(

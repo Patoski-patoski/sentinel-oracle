@@ -143,7 +143,9 @@ export class CognoDBService implements OnModuleInit, OnModuleDestroy {
       // 1. Wash trading query
       const washQuery = `
         MATCH (start:Wallet)-[r0:TRANSFERRED]->(mid:Wallet)-[path:TRANSFERRED*1..5]->(start)
-        WHERE ALL(r IN relationships(path) WHERE r.amount >= $minAmount) AND r0.amount >= $minAmount
+        WHERE (r0.tokenSymbol = $targetSymbol OR ALL(r IN relationships(path) WHERE r.tokenSymbol = $targetSymbol))
+          AND ALL(r IN relationships(path) WHERE r.amount >= $minAmount)
+          AND r0.amount >= $minAmount
         WITH start, r0, mid, path, relationships(path) AS pathRels, (length(path) + 1) AS hopCount
         RETURN 
           start.address AS originAddress,
@@ -155,7 +157,7 @@ export class CognoDBService implements OnModuleInit, OnModuleDestroy {
       `;
       const washResult = await session.run(
         washQuery,
-        { minAmount },
+        { minAmount, targetSymbol: target },
         queryConfig,
       );
       const cycles: WashTradingCycle[] = washResult.records.map((rec) => ({
@@ -196,6 +198,7 @@ export class CognoDBService implements OnModuleInit, OnModuleDestroy {
       // 3. Peeling Chain query
       const peelingQuery = `
         MATCH (origin:Wallet)-[r0:TRANSFERRED]->(h1:Wallet)-[path:TRANSFERRED*1..5]->(dest:Exchange)
+        MATCH (origin)-[:FUNDED]->(:Wallet)-[:SWAPPED]->(t:Token {symbol: $targetSymbol})
         WHERE r0.amount >= $minStartAmount
         WITH origin, r0, h1, path, dest, relationships(path) AS pathRels, (length(path) + 1) AS hopCount
         RETURN 
@@ -209,7 +212,7 @@ export class CognoDBService implements OnModuleInit, OnModuleDestroy {
       `;
       const peelingResult = await session.run(
         peelingQuery,
-        { minStartAmount: minAmount },
+        { minStartAmount: minAmount, targetSymbol: target },
         queryConfig,
       );
       const peelingChains: PeelingChain[] = peelingResult.records.map(
