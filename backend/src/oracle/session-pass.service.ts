@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, type OnModuleDestroy } from "@nestjs/common";
 import { createHmac, randomUUID } from "node:crypto";
 import { ConfigService } from "../config/config.service.js";
 
@@ -30,10 +30,17 @@ export interface SessionPassStatus {
   isExpired: boolean;
 }
 
+interface SessionRecord {
+  used: number;
+  maxQueries: number;
+  expiresAt: number;
+}
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const DEFAULT_MAX_QUERIES = 100;
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const PRUNE_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 
 // ─── Type Guards ─────────────────────────────────────────────────────────────
 
@@ -60,21 +67,50 @@ function isSessionPassToken(value: unknown): value is SessionPassToken {
 // ─── Service ─────────────────────────────────────────────────────────────────
 
 @Injectable()
-export class SessionPassService {
+export class SessionPassService implements OnModuleDestroy {
   private readonly logger = new Logger(SessionPassService.name);
   private readonly hmacSecret: string;
 
   /**
-   * In-memory quota tracker.
-   * Key: passId → number of queries already consumed.
+   * In-memory quota tracker with TTL for bounded memory.
+   * Key: passId → SessionRecord
    */
-  private readonly consumed = new Map<string, number>();
+  private readonly sessions = new Map<string, SessionRecord>();
+  private pruneTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly configService: ConfigService) {
     this.hmacSecret =
       this.configService.get("SESSION_PASS_SECRET") ??
       "sentinel-session-secret-dev";
     this.logger.log({ event: "SESSION_PASS_SERVICE_INITIALIZED" });
+
+    // Periodically prune expired or fully consumed session records
+    this.pruneTimer = setInterval(() => this.pruneExpired(), PRUNE_INTERVAL_MS);
+  }
+
+  onModuleDestroy(): void {
+    if (this.pruneTimer) {
+      clearInterval(this.pruneTimer);
+      this.pruneTimer = null;
+    }
+  }
+
+  /**
+   * Prune expired or exhausted session pass entries to prevent memory leaks (Comment 4).
+   */
+  pruneExpired(): number {
+    const now = Date.now();
+    let pruned = 0;
+    for (const [passId, record] of this.sessions.entries()) {
+      if (now > record.expiresAt || record.used >= record.maxQueries) {
+        this.sessions.delete(passId);
+        pruned++;
+      }
+    }
+    if (pruned > 0) {
+      this.logger.log({ event: "SESSION_PASSES_PRUNED", count: pruned });
+    }
+    return pruned;
   }
 
   // ─── Token Generation ────────────────────────────────────────────────────
@@ -99,8 +135,12 @@ export class SessionPassService {
     const signature = this.sign(payload);
     const token: SessionPassToken = { payload, signature };
 
-    // Initialise quota tracking
-    this.consumed.set(payload.passId, 0);
+    // Initialise quota tracking with TTL
+    this.sessions.set(payload.passId, {
+      used: 0,
+      maxQueries,
+      expiresAt: payload.expiresAt,
+    });
 
     this.logger.log({
       event: "SESSION_PASS_ISSUED",
@@ -131,11 +171,21 @@ export class SessionPassService {
     const { payload } = parsed;
 
     if (Date.now() > payload.expiresAt) {
+      this.sessions.delete(payload.passId);
       return { valid: false, reason: "Session pass expired" };
     }
 
-    const used = this.consumed.get(payload.passId) ?? 0;
-    const remaining = payload.maxQueries - used;
+    let record = this.sessions.get(payload.passId);
+    if (!record) {
+      record = {
+        used: 0,
+        maxQueries: payload.maxQueries,
+        expiresAt: payload.expiresAt,
+      };
+      this.sessions.set(payload.passId, record);
+    }
+
+    const remaining = payload.maxQueries - record.used;
 
     if (remaining <= 0) {
       return { valid: false, reason: "Query quota exhausted" };
@@ -168,6 +218,7 @@ export class SessionPassService {
     const { payload } = parsed;
 
     if (Date.now() > payload.expiresAt) {
+      this.sessions.delete(payload.passId);
       this.logger.warn({
         event: "SESSION_PASS_EXPIRED_CONSUMPTION",
         passId: payload.passId,
@@ -175,9 +226,17 @@ export class SessionPassService {
       return { valid: false, reason: "Session pass expired" };
     }
 
-    // Atomic increment — single-threaded JS guarantees no race conditions
-    const used = this.consumed.get(payload.passId) ?? 0;
-    if (used >= payload.maxQueries) {
+    let record = this.sessions.get(payload.passId);
+    if (!record) {
+      record = {
+        used: 0,
+        maxQueries: payload.maxQueries,
+        expiresAt: payload.expiresAt,
+      };
+      this.sessions.set(payload.passId, record);
+    }
+
+    if (record.used >= payload.maxQueries) {
       this.logger.warn({
         event: "SESSION_PASS_QUOTA_EXHAUSTED",
         passId: payload.passId,
@@ -185,14 +244,13 @@ export class SessionPassService {
       return { valid: false, reason: "Query quota exhausted" };
     }
 
-    const newUsed = used + 1;
-    this.consumed.set(payload.passId, newUsed);
-    const remaining = payload.maxQueries - newUsed;
+    record.used += 1;
+    const remaining = payload.maxQueries - record.used;
 
     this.logger.log({
       event: "SESSION_PASS_QUERY_CONSUMED",
       passId: payload.passId,
-      queriesUsed: newUsed,
+      queriesUsed: record.used,
       remaining,
     });
 
@@ -217,7 +275,13 @@ export class SessionPassService {
     if (!this.verifySignature(parsed)) return null;
 
     const { payload } = parsed;
-    const used = this.consumed.get(payload.passId) ?? 0;
+    const isExpired = Date.now() > payload.expiresAt;
+    if (isExpired) {
+      this.sessions.delete(payload.passId);
+    }
+
+    const record = this.sessions.get(payload.passId);
+    const used = record?.used ?? 0;
 
     return {
       passId: payload.passId,
@@ -225,7 +289,7 @@ export class SessionPassService {
       remaining: Math.max(0, payload.maxQueries - used),
       maxQueries: payload.maxQueries,
       expiresAt: new Date(payload.expiresAt).toISOString(),
-      isExpired: Date.now() > payload.expiresAt,
+      isExpired,
     };
   }
 

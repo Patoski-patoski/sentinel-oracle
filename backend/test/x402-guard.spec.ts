@@ -413,4 +413,16 @@ describe("X402PaymentGuard", () => {
       expect(err instanceof InvalidPaymentException).toBe(true);
     }
   });
+
+  it("session pass: pruneExpired cleans up expired and exhausted passes", async () => {
+    // Generate an already-expired pass (TTL = -1000ms)
+    sessionPassService.generateToken("PayerExpired", 10, -1000);
+
+    // Prune should find and delete it
+    const prunedCount = sessionPassService.pruneExpired();
+    expect(prunedCount).toBeGreaterThanOrEqual(1);
+
+    // Clean up timer
+    sessionPassService.onModuleDestroy();
+  });
 });
